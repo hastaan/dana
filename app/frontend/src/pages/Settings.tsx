@@ -269,12 +269,17 @@ function ProvidersPanel({ catalogModels, onRefreshCatalog }: { catalogModels: Ca
     try {
       const res = await api.providers.login(providerId)
       if (res.oauth_url) setLogin({ provider: providerId as ProviderId, oauthUrl: res.oauth_url })
+      const state = res.state
+      let ticks = 0
       const poll = setInterval(async () => {
+        ticks += 1
         try {
-          const status = await api.providers.loginStatus(providerId)
-          if (status.oauth_url) setLogin({ provider: providerId as ProviderId, oauthUrl: status.oauth_url })
+          const status = await api.providers.loginStatus(providerId, state)
           if (status.connected) { clearInterval(poll); setLogin(null); await refreshAll(); return }
-          if (status.timeout) { clearInterval(poll); setLogin(null); setProviders(cur => cur.map(p => p.provider === providerId ? { ...p, status: "error" as const } : p)) }
+          if (status.error || ticks > 90) { // ~3 min ceiling
+            clearInterval(poll); setLogin(null)
+            setProviders(cur => cur.map(p => p.provider === providerId ? { ...p, status: "error" as const } : p))
+          }
         } catch { clearInterval(poll); setLogin(null); setProviders(cur => cur.map(p => p.provider === providerId ? { ...p, status: "error" as const } : p)) }
       }, 2000)
     } catch { setProviders(cur => cur.map(p => p.provider === providerId ? { ...p, status: "error" as const } : p)) }

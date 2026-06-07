@@ -147,6 +147,57 @@ export async function putClaudeApiKey(list: ClaudeKeyProvider[]): Promise<void> 
   log.llm("proxyAdmin: claude-api-key updated", `${list.length} provider(s)`)
 }
 
+// ── OAuth auth files (the live proxy's real credentials) ─────────────────────
+
+export interface AuthFile {
+  id: string            // filename, e.g. "claude-foo@bar.com.json"
+  name: string
+  provider: string      // claude | codex | gemini | qwen | ...
+  account?: string
+  email?: string
+  status?: string       // ok | error
+  status_message?: string
+  disabled?: boolean
+  type?: string
+  account_type?: string
+}
+
+async function mgmtJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const res = await mgmtFetch(path, init)
+  if (res.status === 401) throw new ManagementError("Management key rejected by proxy (401)", 401)
+  if (res.status === 404) throw new ManagementUnavailableError(`Endpoint ${path} not found (404)`)
+  if (!res.ok) {
+    log.error("proxyAdmin", `${init.method ?? "GET"} ${path} → HTTP ${res.status}: ${await res.text().catch(() => "")}`)
+    throw new ManagementError(`Proxy management ${init.method ?? "GET"} ${path} failed (HTTP ${res.status})`, res.status)
+  }
+  try {
+    return (await res.json()) as T
+  } catch (e) {
+    log.error("proxyAdmin", `${path} returned non-JSON`, e)
+    throw new ManagementError(`Proxy management ${path} returned an unparseable response`, 502)
+  }
+}
+
+export async function listAuthFiles(): Promise<AuthFile[]> {
+  const data = await mgmtJson<{ files?: AuthFile[] }>("/auth-files")
+  return Array.isArray(data.files) ? data.files : []
+}
+
+export async function deleteAuthFile(name: string): Promise<void> {
+  await mgmtJson(`/auth-files?name=${encodeURIComponent(name)}`, { method: "DELETE" })
+  log.llm("proxyAdmin: auth file removed", name)
+}
+
+// Initiate an OAuth login; the proxy returns a browser URL + a state to poll.
+// endpoint is provider-specific, e.g. anthropic-auth-url / codex-auth-url / gemini-cli-auth-url.
+export async function getProviderAuthUrl(endpoint: string): Promise<{ url: string; state: string }> {
+  return mgmtJson<{ url: string; state: string }>(`/${endpoint}`)
+}
+
+export async function getAuthStatus(state: string): Promise<{ status: string }> {
+  return mgmtJson<{ status: string }>(`/get-auth-status?state=${encodeURIComponent(state)}`)
+}
+
 // ── Availability probe ───────────────────────────────────────────────────────
 
 export interface ManagementStatus {

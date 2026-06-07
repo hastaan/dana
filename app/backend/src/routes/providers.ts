@@ -1,176 +1,192 @@
+// LLM provider management. Provider list / OAuth connect / disconnect all go through
+// the CLIProxyAPI management API over HTTP (auth-files + *-auth-url + get-auth-status),
+// so Dana never has to share the proxy's filesystem or spawn its binary. This works
+// identically whether the proxy is bundled in this container or runs separately, and
+// reflects the proxy's REAL live credential state (no stale/empty-dir mismatches).
+//
+// A read-only legacy fallback (scanning $CLIPROXY_AUTH_DIR / $DATA_DIR/.cli-proxy-api)
+// is kept only for listing when the management API is unavailable.
 import { Elysia, t } from "elysia"
-import { readdirSync, rmSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs"
+import { readdirSync, existsSync, readFileSync } from "fs"
 import { join } from "path"
-import { spawn } from "child_process"
 import { fetchAvailableModels, isProxyAvailable, invalidateVerifiedModels } from "../llm/proxyClient"
+import {
+  listAuthFiles,
+  deleteAuthFile,
+  getProviderAuthUrl,
+  getAuthStatus,
+  getManagementStatus,
+  ManagementError,
+  ManagementUnavailableError,
+} from "../llm/proxyAdmin"
+import { log } from "../utils/logger"
 
-const credentialsDir = () => join(process.env.DATA_DIR || "/home/nima/dana/data", ".cli-proxy-api")
-const loginTimeoutMs = Number(process.env.PROVIDER_LOGIN_TIMEOUT_MS || 120000)
-const activeLogins = new Map<string, { startedAt: number; oauthUrl?: string; done: boolean; error?: string; proc?: ReturnType<typeof spawn> }>()
-
-function ensureCredentialsDir() {
-  mkdirSync(credentialsDir(), { recursive: true })
+// Dana-facing provider id → the proxy's OAuth auth-url endpoint.
+const AUTH_URL_ENDPOINT: Record<string, string> = {
+  claude: "anthropic-auth-url",
+  openai: "codex-auth-url",
+  gemini: "gemini-cli-auth-url",
 }
 
 function providerLabel(provider: string) {
   return provider === "claude" ? "Anthropic" : provider[0].toUpperCase() + provider.slice(1)
 }
 
-function scanProviderCredentials() {
-  const dir = credentialsDir()
-  if (!existsSync(dir)) return []
-  return readdirSync(dir).filter(name => name.endsWith(".json") || name.endsWith(".yaml") || name.endsWith(".yml") || name.endsWith(".token"))
-}
-
 function normalizeProvider(provider: string) {
   return provider.toLowerCase().trim()
 }
 
-function loginFlagForProvider(provider: string) {
-  if (provider === "openai") return "codex"
-  if (provider === "gemini") return "login"
-  return provider
+// Map the proxy's auth-file provider names to Dana's provider ids.
+function danaProvider(p: string): string {
+  const v = (p || "").toLowerCase()
+  if (v === "codex") return "openai"
+  if (v === "google") return "gemini"
+  return v
 }
 
-function providerFromFile(name: string) {
-  const normalized = name.replace(/\.(json|yaml|yml|token)$/i, "")
-  const base = normalized.replace(/^(credentials-|auth-|token-)/, "")
+function errorResponse(set: { status?: number | string }, e: unknown) {
+  if (e instanceof ManagementUnavailableError) {
+    set.status = 503
+    return { error: "management_unavailable", message: e.message }
+  }
+  if (e instanceof ManagementError) {
+    set.status = e.status === 401 ? 401 : 502
+    return { error: "management_error", message: e.message }
+  }
+  set.status = 500
+  return { error: "error", message: e instanceof Error ? e.message : String(e) }
+}
+
+// ── Legacy read-only fallback (only used if the management API is unavailable) ──
+function legacyCredentialsDir() {
+  return process.env.CLIPROXY_AUTH_DIR?.trim() || join(process.env.DATA_DIR || "/home/nima/dana/data", ".cli-proxy-api")
+}
+function legacyProviderFromFile(name: string) {
+  const base = name.replace(/\.(json|yaml|yml|token)$/i, "").replace(/^(credentials-|auth-|token-)/, "")
   if (base.startsWith("claude-")) return "claude"
   if (base.startsWith("codex-") || base.startsWith("openai-") || base.startsWith("gpt-")) return "openai"
-  if (base.startsWith("gemini-") || base.startsWith("google-") || base === "google") return "gemini"
-  if (base.startsWith("qwen-")) return "qwen"
-  if (base.startsWith("kimi-")) return "kimi"
-  if (base.startsWith("iflow-")) return "iflow"
-  if (base.startsWith("antigravity-")) return "antigravity"
+  if (base.startsWith("gemini-") || base.startsWith("google-")) return "gemini"
   return base.split("-")[0]
+}
+function legacyList() {
+  const dir = legacyCredentialsDir()
+  if (!existsSync(dir)) return []
+  return readdirSync(dir)
+    .filter((n) => n.endsWith(".json"))
+    .map((file) => {
+      const provider = legacyProviderFromFile(file)
+      let account: string | null = null
+      try {
+        const parsed = JSON.parse(readFileSync(join(dir, file), "utf8"))
+        account = parsed?.email || parsed?.account || parsed?.username || parsed?.name || null
+      } catch { /* ignore */ }
+      return { provider, label: providerLabel(provider), status: "connected", account, credential_file: file }
+    })
 }
 
 export const providersRouter = new Elysia({ prefix: "/api/providers" })
   .get("/", async () => {
-    const files = scanProviderCredentials()
-    const connected = files.map(file => {
-      const provider = providerFromFile(file)
-      let account: string | null = null
-      try {
-        const raw = readFileSync(join(credentialsDir(), file), "utf8")
-        const parsed = raw.trim().startsWith("{") ? JSON.parse(raw) : null
-        account = parsed?.email || parsed?.account || parsed?.username || parsed?.name || null
-      } catch {}
-      return { provider, label: providerLabel(provider), status: "connected", account, credential_file: file }
-    })
-    return { providers: connected }
-  })
-  .post("/login", async ({ body, set }) => {
-    if (!(await isProxyAvailable())) {
-      set.status = 503
-      return { error: "CLIProxyAPI unavailable" }
-    }
-
-    const provider = normalizeProvider(body.provider)
-    ensureCredentialsDir()
-
-    // Kill any previous login process for this provider
-    const existing = activeLogins.get(provider)
-    if (existing?.proc) {
-      try { existing.proc.kill() } catch {}
-    }
-
-    const callbackPort = process.env.OAUTH_CALLBACK_PORT || "54545"
-    const loginFlag = loginFlagForProvider(provider)
-    // Gemini's -login flag starts a full proxy — use a separate config on a non-conflicting port
-    const needsSeparateConfig = loginFlag === "login"
-    let configFlag: string
-    if (needsSeparateConfig) {
-      const loginConfigPath = "/tmp/cli-proxy-login-config.yaml"
-      writeFileSync(loginConfigPath, `port: 29999\nauth-dir: "${credentialsDir()}"\n`)
-      configFlag = `-config ${loginConfigPath}`
-    } else {
-      configFlag = process.env.CLIPROXY_CONFIG ? `-config ${process.env.CLIPROXY_CONFIG}` : "-config /tmp/cli-proxy-config.yaml"
-    }
-    const callbackArg = loginFlag === "codex" ? "" : `-oauth-callback-port ${callbackPort} `
-    const loginArg = loginFlag === "login" ? "-login" : `-${loginFlag}-login`
-    const command = `CLIProxyAPI ${configFlag} ${callbackArg}${loginArg} -no-browser`
-    const proc = spawn(command, { shell: true, env: process.env })
-    const state = { startedAt: Date.now(), done: false, oauthUrl: undefined as string | undefined, error: undefined as string | undefined, proc }
-    activeLogins.set(provider, state)
-
-    // Gemini login requires interactive project selection — auto-select Google One mode
-    if (needsSeparateConfig && proc.stdin) {
-      const autoRespond = (text: string) => {
-        if (/Enter choice \[1\/2\]/i.test(text)) proc.stdin?.write("1\n")
-        else if (/Enter choice \[1\]/i.test(text)) proc.stdin?.write("1\n")
-        else if (/Enter project/i.test(text)) proc.stdin?.write("\n")
+    try {
+      const files = await listAuthFiles()
+      return {
+        providers: files.map((f) => {
+          const provider = danaProvider(f.provider)
+          return {
+            provider,
+            label: providerLabel(provider),
+            status: "connected",
+            account: f.account || f.email || null,
+            credential_file: f.id || f.name,
+            health: f.status ?? null,             // ok | error (auth currently working?)
+            health_message: f.status_message ?? null,
+          }
+        }),
       }
-      proc.stdout.on("data", (chunk: Buffer) => autoRespond(String(chunk)))
+    } catch {
+      // Management API unavailable — fall back to a read-only directory scan.
+      return { providers: legacyList() }
     }
-
-    const logLines: string[] = []
-    proc.stdout.on("data", chunk => {
-      const text = String(chunk)
-      logLines.push(`[stdout] ${text.trim()}`)
-      const match = text.match(/https?:\/\/\S+/)
-      if (match && !state.oauthUrl) state.oauthUrl = match[0]
-    })
-    proc.stderr.on("data", chunk => {
-      const text = String(chunk)
-      logLines.push(`[stderr] ${text.trim()}`)
-      if (!state.error) state.error = text.trim()
-    })
-    proc.on("exit", code => {
-      state.done = code === 0
-      logLines.push(`[exit] code=${code}`)
-      try { writeFileSync("/tmp/provider-login-debug.log", logLines.join("\n") + "\n") } catch {}
-      if (code === 0) invalidateVerifiedModels()
-    })
-
-    return { provider, oauth_url: state.oauthUrl ?? null, status: "started" }
-  }, { body: t.Object({ provider: t.String() }) })
-  .get("/login/status", async ({ query }) => {
-    const provider = normalizeProvider(query.provider)
-    const state = activeLogins.get(provider)
-    const credential = scanProviderCredentials().find(file => providerFromFile(file) === provider)
-    if (credential) {
-      return { provider, connected: true, timeout: false }
-    }
-    if (!state) return { provider, connected: false, timeout: false }
-    const timedOut = Date.now() - state.startedAt > loginTimeoutMs
-    if (timedOut) return { provider, connected: false, timeout: true }
-    return { provider, connected: state.done, timeout: false, oauth_url: state.oauthUrl ?? null, error: state.error ?? null }
   })
+
+  // Begin an OAuth login: the proxy returns a browser URL + a state to poll.
+  .post("/login", async ({ body, set }) => {
+    const provider = normalizeProvider(body.provider)
+    const endpoint = AUTH_URL_ENDPOINT[provider]
+    if (!endpoint) {
+      set.status = 400
+      return { error: "bad_request", message: `Unsupported provider "${provider}"` }
+    }
+    try {
+      const { url, state } = await getProviderAuthUrl(endpoint)
+      return { provider, oauth_url: url, state, status: "started" }
+    } catch (e) {
+      return errorResponse(set, e)
+    }
+  }, { body: t.Object({ provider: t.String() }) })
+
+  // Poll an in-progress OAuth login by its state token.
+  .get("/login/status", async ({ query }) => {
+    const provider = normalizeProvider(String(query.provider ?? ""))
+    const state = query.state ? String(query.state) : ""
+    if (!state) return { provider, connected: false, timeout: false }
+    try {
+      const { status } = await getAuthStatus(state)
+      if (status === "ok") {
+        invalidateVerifiedModels()
+        return { provider, connected: true, timeout: false }
+      }
+      if (status === "error") {
+        return { provider, connected: false, timeout: false, error: "Authorization failed" }
+      }
+      return { provider, connected: false, timeout: false } // "wait"
+    } catch {
+      return { provider, connected: false, timeout: false }
+    }
+  })
+
+  // Disconnect: remove every auth file the proxy holds for this provider.
   .delete("/:provider", async ({ params, set }) => {
     const provider = normalizeProvider(params.provider)
-    ensureCredentialsDir()
-    const files = scanProviderCredentials().filter(file => providerFromFile(file) === provider)
-    for (const file of files) rmSync(join(credentialsDir(), file), { force: true })
-    invalidateVerifiedModels()
-    return { provider, removed: files.length }
+    try {
+      const files = await listAuthFiles()
+      const toDelete = files.filter((f) => danaProvider(f.provider) === provider)
+      for (const f of toDelete) await deleteAuthFile(f.id || f.name)
+      invalidateVerifiedModels()
+      log.llm("Provider disconnected", `${provider} (${toDelete.length} credential(s))`)
+      return { provider, removed: toDelete.length }
+    } catch (e) {
+      return errorResponse(set, e)
+    }
   })
+
   .get("/models", async () => {
     const models = await fetchAvailableModels()
     const grouped = new Map<string, string[]>()
     for (const model of models) {
       const rawProvider = (model.owned_by || model.id.split("/")[0] || "unknown").toLowerCase()
-      const provider = rawProvider === "anthropic" ? "claude"
-        : rawProvider === "google" ? "gemini"
-        : rawProvider
+      const provider = rawProvider === "anthropic" ? "claude" : rawProvider === "google" ? "gemini" : rawProvider
       if (!grouped.has(provider)) grouped.set(provider, [])
       grouped.get(provider)!.push(model.id)
     }
     return { providers: Array.from(grouped.entries()).map(([provider, models]) => ({ provider, models })) }
   })
+
   .get("/health", async () => {
     const proxyUp = await isProxyAvailable()
-    const credentials = scanProviderCredentials()
-    const connectedProviders = [...new Set(credentials.map(f => providerFromFile(f)))]
+    let connectedProviders: string[] = []
+    let credentialFiles = 0
+    try {
+      const files = await listAuthFiles()
+      credentialFiles = files.length
+      connectedProviders = [...new Set(files.map((f) => danaProvider(f.provider)))]
+    } catch {
+      const legacy = legacyList()
+      credentialFiles = legacy.length
+      connectedProviders = [...new Set(legacy.map((f) => f.provider))]
+    }
     let modelCount = 0
-    if (proxyUp) {
-      const models = await fetchAvailableModels()
-      modelCount = models.length
-    }
-    return {
-      proxy_online: proxyUp,
-      connected_providers: connectedProviders,
-      model_count: modelCount,
-      credential_files: credentials.length,
-    }
+    if (proxyUp) modelCount = (await fetchAvailableModels()).length
+    return { proxy_online: proxyUp, connected_providers: connectedProviders, model_count: modelCount, credential_files: credentialFiles }
   })
+
+  .get("/management-status", async () => getManagementStatus())
