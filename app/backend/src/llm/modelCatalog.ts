@@ -175,6 +175,22 @@ export async function resolveSmartDefault(profile: TaskProfile): Promise<string 
   return allMeta[0].id
 }
 
+// Resolve a requested model to one that is actually available right now. If the
+// requested model isn't available (provider disconnected / not configured / "off"),
+// fall back to a smart default of the same tier among the available models. Returns
+// the requested model unchanged when it IS available, or when there's nothing to
+// resolve against (so the genuine error still surfaces).
+export async function resolveAvailableModel(requested: string): Promise<string> {
+  if (!requested) return requested
+  const available = await fetchAvailableModels()
+  if (available.length === 0) return requested
+  if (available.some(m => m.id === requested)) return requested
+  const meta = getModelMeta(requested)
+  const profile: TaskProfile =
+    meta?.tier === "powerful" ? "deep_reasoning" : meta?.tier === "fast" ? "fast" : "balanced"
+  return (await resolveSmartDefault(profile)) ?? available[0].id
+}
+
 export function getSmartDefaultSync(profile: TaskProfile): { modelId: string; displayName: string } | null {
   const allMeta = getAllModelMeta()
   if (allMeta.length === 0) return null

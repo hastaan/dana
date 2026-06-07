@@ -192,10 +192,14 @@ export async function fetchAvailableModels(): Promise<ModelInfo[]> {
   return models.filter(m => verified.has(m.id))
 }
 
+// Tracks (requested→resolved) substitutions we've already logged, to avoid log spam.
+const _modelSubLog = new Set<string>()
+
 export function invalidateVerifiedModels(): void {
   _verifiedModels = null
   _verificationPromise = null
   _modelsCache = null
+  _modelSubLog.clear()
 }
 
 export function isProxyAvailable(): Promise<boolean> {
@@ -209,10 +213,24 @@ export function isProxyAvailable(): Promise<boolean> {
 }
 
 export async function chatCompletion(options: ChatCompletionOptions): Promise<ChatCompletionResponse> {
-  const limiter = getRateLimiter(options.model)
+  // Fall back to an available model if the requested one isn't served right now
+  // (e.g. its provider is disconnected/"off"). Non-destructive: stored config is
+  // untouched; the requested model is used again once it's available.
+  let model = options.model
+  try {
+    const { resolveAvailableModel } = await import("./modelCatalog")
+    const resolved = await resolveAvailableModel(model)
+    if (resolved && resolved !== model) {
+      const key = `${model}=>${resolved}`
+      if (!_modelSubLog.has(key)) { _modelSubLog.add(key); log.llm(`model "${model}" unavailable → using "${resolved}"`) }
+      model = resolved
+    }
+  } catch { /* best-effort; proceed with the requested model and let it surface */ }
+
+  const limiter = getRateLimiter(model)
   const startTime = Date.now()
   const promptPreview = options.messages[options.messages.length - 1]?.content?.slice(0, 80) || ""
-  log.llm(`→ ${options.model}`, `"${promptPreview}..."`)
+  log.llm(`→ ${model}`, `"${promptPreview}..."`)
 
   for (let attempt = 0; attempt <= RETRY_BACKOFFS.length; attempt++) {
     try {
@@ -225,7 +243,7 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<Ch
           Authorization: `Bearer ${process.env.PROXY_API_KEY || "sk-dummy"}`,
         },
         body: JSON.stringify({
-          model: options.model,
+          model,
           messages: options.messages,
           temperature: options.temperature ?? 0.7,
           max_tokens: options.max_tokens,
@@ -248,7 +266,7 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<Ch
       const tokens = result.usage
         ? `${result.usage.prompt_tokens}→${result.usage.completion_tokens} tok`
         : "no usage data"
-      log.llm(`← ${options.model} ${elapsed}ms`, tokens)
+      log.llm(`← ${model} ${elapsed}ms`, tokens)
       return result
     } catch (e) {
       if (attempt < RETRY_BACKOFFS.length) {
