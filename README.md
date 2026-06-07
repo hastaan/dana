@@ -102,6 +102,7 @@ Alternatively, use the management script to start both services at once:
 | `PORT` | `3000` | Backend server port |
 | `DATA_DIR` | `/data` (Docker), `./data` (local) | Directory for SQLite database and CLIProxyAPI auth data |
 | `PROXY_BASE_URL` | `http://127.0.0.1:8317` | CLIProxyAPI base URL |
+| `SEARXNG_URL` | `http://searxng:8080` | SearXNG base URL for web search. The default resolves **inside the Docker Compose network**; for a host-run dev backend, start SearXNG (`docker compose up -d searxng`) and set `http://localhost:8080`. If unreachable, search falls back to scraping Brave (which rate-limits quickly). |
 | `MANAGEMENT_SECRET` | auto-generated (Docker) | Secret for the CLIProxyAPI management API, used to add custom providers from the UI. In Docker it's generated and persisted to `$DATA_DIR/.management-secret`. Must match `remote-management.secret-key` in the proxy config. |
 | `FIRECRAWL_URL` | _(unset)_ | Optional Firecrawl/localfirecrawl base URL (e.g. `http://localhost:3002`). When set, page fetches try Firecrawl `/v1/scrape` (Playwright-rendered) first, then fall back to Jina/Readability. |
 
