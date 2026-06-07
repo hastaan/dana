@@ -21,6 +21,7 @@ services:
     depends_on:
       searxng:
         condition: service_started
+    restart: unless-stopped
     networks:
       - dana-net
 
@@ -30,6 +31,7 @@ services:
       - "8080:8080"
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
     networks:
       - dana-net
 

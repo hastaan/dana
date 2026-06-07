@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-FROM eceasy/cli-proxy-api:latest AS proxy
+# Pinned to v6.9.4 — Dana's provider/custom-provider management is built against this
+# version's management API (/v0/management/openai-compatibility, /claude-api-key,
+# /auth-files, *-auth-url). Newer "latest" (v7.x) removed some of those endpoints, so
+# do NOT float to :latest without re-validating routes/providers.ts + routes/customProviders.ts.
+FROM eceasy/cli-proxy-api@sha256:dbb1bc7d77f77aa1e9676872af15e18970ab30162649480126efc62ced224f11 AS proxy
 
 FROM oven/bun:1-alpine AS builder
 WORKDIR /app

@@ -47,7 +47,7 @@ remote-management:
   allow-remote: false
   secret-key: '${ESCAPED_SECRET}'
 EOF
-elif ! grep -q "remote-management" "$CONFIG_FILE"; then
+elif ! grep -qE '^[[:space:]]*remote-management:' "$CONFIG_FILE"; then
   cat >> "$CONFIG_FILE" <<EOF
 remote-management:
   allow-remote: false
