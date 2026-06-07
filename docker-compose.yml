@@ -1,0 +1,38 @@
+services:
+  dana:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      SEARXNG_URL: http://searxng:8080
+      # Optional: point at a running localfirecrawl / Firecrawl self-host for
+      # Playwright-rendered page fetches (unlocks JS-heavy & paywalled sources).
+      # localfirecrawl is a heavy separate stack (Chromium + redis + worker), so it
+      # is NOT bundled here — run it separately and set FIRECRAWL_URL to reach it,
+      # e.g. http://host.docker.internal:3002. Unset → fetches use Jina/Readability.
+      FIRECRAWL_URL: ${FIRECRAWL_URL:-}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+    ports:
+      - "3000:3000"
+      - "54545:54545"
+      - "1455:1455"
+    volumes:
+      - ./data:/data
+    depends_on:
+      searxng:
+        condition: service_started
+    networks:
+      - dana-net
+
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    networks:
+      - dana-net
+
+networks:
+  dana-net:
+    driver: bridge

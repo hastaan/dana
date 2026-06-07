@@ -1,0 +1,41 @@
+use_default_settings: true
+
+search:
+  formats:
+    - html
+    - json
+  default_lang: all
+
+server:
+  limiter: false
+  secret_key: "4ced9d1ff16fbce79a94aea9c729277b6f755f02c68fd973"
+
+engines:
+  - name: google
+    engine: google
+    disabled: false
+    shortcut: g
+  - name: duckduckgo
+    engine: duckduckgo
+    disabled: false
+    shortcut: ddg
+  - name: brave
+    engine: brave
+    disabled: false
+    shortcut: br
+  - name: qwant
+    engine: qwant
+    disabled: false
+    shortcut: qw
+  - name: bing
+    engine: bing
+    disabled: false
+    shortcut: bi
+  - name: startpage
+    engine: startpage
+    disabled: false
+    shortcut: sp
+  - name: mojeek
+    engine: mojeek
+    disabled: false
+    shortcut: mj
