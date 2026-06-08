@@ -1,4 +1,6 @@
 import * as cheerio from "cheerio"
+import { log } from "../../utils/logger"
+import { filterSources } from "./sourceFilter"
 
 export interface SearchResult {
   title: string
@@ -7,6 +9,15 @@ export interface SearchResult {
   date?: string  // ISO date string, extracted from snippet text or URL path when detectable
 }
 
+// SearXNG transient-error retry backoff (ms). Mirrors server-py web_search.py (_BACKOFF).
+const SEARXNG_BACKOFFS = [1000, 3000]
+
+// Failure-tolerant search (⇄ server-py tools/web_search.py): SearXNG is the primary path. Its
+// per-engine CAPTCHA/403 noise (DuckDuckGo etc.) still leaves results from the engines that
+// answered, so a 200 with empty/partial results is a VALID answer, not a failure — we return it
+// as-is (no fallback on empty). We retry SearXNG with backoff on real transport/5xx errors, and
+// only fall back to the Brave HTML scrape as a genuine last resort (it rate-limits/429s hard).
+// On total failure we return [] (log a warning) so one bad search never aborts discovery.
 export async function webSearch(
   query: string,
   numResults: number = 5,
@@ -15,18 +26,26 @@ export async function webSearch(
 ): Promise<SearchResult[]> {
   const searxngUrl = process.env.SEARXNG_URL || "http://searxng:8080"
 
-  try {
-    return await searchWithSearXNG(searxngUrl, query, numResults, dateFilter, language)
-  } catch (searxngError) {
+  let lastError: unknown
+  for (let attempt = 0; attempt <= SEARXNG_BACKOFFS.length; attempt++) {
     try {
-      return await searchWithBrave(query, numResults)
-    } catch (braveError) {
-      const primaryMessage = getErrorMessage(searxngError)
-      const fallbackMessage = getErrorMessage(braveError)
-      throw new Error(
-        `webSearch failed: SearXNG error: ${primaryMessage}; Brave fallback error: ${fallbackMessage}`
-      )
+      // 200 → results (possibly empty) is success; return without falling back.
+      return filterSources(await searchWithSearXNG(searxngUrl, query, numResults, dateFilter, language))
+    } catch (searxngError) {
+      lastError = searxngError
+      if (attempt < SEARXNG_BACKOFFS.length) {
+        await new Promise(r => setTimeout(r, SEARXNG_BACKOFFS[attempt]))
+      }
     }
+  }
+
+  log.warn("TOOL", `SearXNG failed after retries (${getErrorMessage(lastError)}); trying Brave once`)
+  try {
+    return filterSources(await searchWithBrave(query, numResults))
+  } catch (braveError) {
+    // Tolerant: degrade to an empty result, never abort the research run.
+    log.warn("TOOL", `webSearch degraded to empty (SearXNG: ${getErrorMessage(lastError)}; Brave: ${getErrorMessage(braveError)})`)
+    return []
   }
 }
 
@@ -59,6 +78,7 @@ async function searchWithSearXNG(
       Accept: "application/json",
       "User-Agent": "Mozilla/5.0 (compatible; Dana/1.0; +https://dana.local)",
     },
+    signal: AbortSignal.timeout(15_000),  // fail fast into retry/degrade instead of hanging
   })
 
   if (!res.ok) {
@@ -94,6 +114,7 @@ async function searchWithBrave(query: string, numResults: number): Promise<Searc
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
       "Accept-Language": "en-US,en;q=0.9",
     },
+    signal: AbortSignal.timeout(15_000),
   })
 
   if (!res.ok) {

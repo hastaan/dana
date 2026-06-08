@@ -1,4 +1,5 @@
 import { log } from "../utils/logger"
+import { stripThink } from "./stripThink"
 
 const PROXY_BASE_URL = process.env.PROXY_BASE_URL || "http://127.0.0.1:8317"
 const TIMEOUT_MS = 300_000  // 5 minutes — Opus can take a while on complex prompts
@@ -262,6 +263,13 @@ export async function chatCompletion(options: ChatCompletionOptions): Promise<Ch
       }
 
       const result = await res.json() as ChatCompletionResponse
+      // Strip <think>…</think> reasoning (MiniMax et al.) from assistant content so it never
+      // poisons downstream JSON parsing. Leaves tool_calls untouched.
+      for (const choice of result.choices ?? []) {
+        if (typeof choice.message?.content === "string") {
+          choice.message.content = stripThink(choice.message.content)
+        }
+      }
       const elapsed = Date.now() - startTime
       const tokens = result.usage
         ? `${result.usage.prompt_tokens}→${result.usage.completion_tokens} tok`

@@ -49,6 +49,9 @@ export const log = {
   tool(msg: string, detail?: string) { console.log(fmt("TOOL", msg, detail)) },
   scoring(msg: string, detail?: string) { console.log(fmt("SCORING", msg, detail)) },
   stage(name: string, msg: string, detail?: string) { console.log(fmt(name.toUpperCase(), msg, detail)) },
+  warn(stage: string, msg: string) {
+    console.warn(`${COLORS.gray}[${ts()}]${COLORS.reset} ${COLORS.yellow}[${stage} WARN]${COLORS.reset} ${msg}`)
+  },
   error(stage: string, msg: string, err?: unknown) {
     console.error(`${COLORS.gray}[${ts()}]${COLORS.reset} ${COLORS.red}[${stage} ERROR]${COLORS.reset} ${msg}`, err ? String(err) : "")
   },
