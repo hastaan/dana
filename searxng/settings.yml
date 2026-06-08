@@ -1,11 +1,3 @@
-# SearXNG config for Dana's JSON-API use.
-#
-# Keep the BROAD default engine set (use_default_settings: true) for resilience: many engines
-# means some always answer even when a few are momentarily rate-limited. Narrowing to a small
-# whitelist was a mistake — `keep_only` doesn't enable engines that ship disabled-by-default
-# (bing/qwant/mojeek), so it collapsed the active set to ~4 and starved results. We only turn
-# OFF the engines that produce pure log spam from a server IP (DuckDuckGo's CAPTCHA tracebacks).
-# Dana's web_search tolerates any single engine failing, so breadth here is the robustness.
 use_default_settings: true
 
 search:
@@ -19,7 +11,31 @@ server:
   secret_key: "4ced9d1ff16fbce79a94aea9c729277b6f755f02c68fd973"
 
 engines:
+  - name: google
+    engine: google
+    disabled: false
+    shortcut: g
   - name: duckduckgo
     engine: duckduckgo
-    disabled: true
+    disabled: false
     shortcut: ddg
+  - name: brave
+    engine: brave
+    disabled: false
+    shortcut: br
+  - name: qwant
+    engine: qwant
+    disabled: false
+    shortcut: qw
+  - name: bing
+    engine: bing
+    disabled: false
+    shortcut: bi
+  - name: startpage
+    engine: startpage
+    disabled: false
+    shortcut: sp
+  - name: mojeek
+    engine: mojeek
+    disabled: false
+    shortcut: mj
