@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .api import calibration as calibration_api
+from .api import internet as internet_api
 from .api import models as models_api
 from .api import pipeline as pipeline_api
 from .api import providers as providers_api
@@ -52,6 +53,7 @@ def create_app() -> FastAPI:
     app.include_router(calibration_api.router)
     app.include_router(settings_api.router)
     app.include_router(providers_api.router)
+    app.include_router(internet_api.router)
 
     @app.get("/health")
     @app.get("/api/health")
