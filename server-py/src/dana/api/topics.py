@@ -67,3 +67,22 @@ async def get_verdict(topic_id: str):
 async def get_verdict_version(topic_id: str, version: int):
     council = await reads.get_expert_council(topic_id, version)
     return council.get("final_verdict") if council else None
+
+
+# ── Forum (⇄ TS forum.ts) ──────────────────────────────────────────────────────
+@router.get("/api/topics/{topic_id}/representatives")
+async def get_representatives(topic_id: str):
+    return await reads.list_representatives(topic_id)
+
+
+@router.get("/api/topics/{topic_id}/forum")
+async def get_forum(topic_id: str, version: int | None = None):
+    return await reads.get_forum_session(topic_id, version=version)
+
+
+@router.get("/api/topics/{topic_id}/forum/{session_id}")
+async def get_forum_by_session(topic_id: str, session_id: str):
+    data = await reads.get_forum_session(topic_id, session_id=session_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail={"message": "Forum session not found"})
+    return data

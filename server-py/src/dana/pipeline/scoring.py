@@ -10,7 +10,7 @@ import asyncio
 from ..agents.scenario_scorer import ScenarioScorer
 from ..db import reads, writers
 from ..events.bus import bus
-from ..llm import dspy_lm
+from ..llm import dspy_lm, steering
 from ..rigor.dedup import independent_density
 
 
@@ -40,6 +40,15 @@ def _evidence_str(clues: list[dict], density: dict) -> str:
     return ("\n".join(lines) or "(no evidence gathered)") + note
 
 
+def forum_evidence_str(clues: list[dict], limit: int = 30) -> str:
+    """Evidence list keyed by REAL clue ids so representatives can cite them."""
+    lines = [
+        f"- {c['id']}: {c.get('title', '')} (cred {c.get('credibility')}): {c.get('summary', '')[:220]}"
+        for c in clues[:limit]
+    ]
+    return "\n".join(lines) or "(no evidence gathered)"
+
+
 async def run_scoring(topic_id: str, title: str, description: str) -> dict:
     def emit(ev: dict) -> None:
         bus.emit(topic_id, ev)
@@ -53,11 +62,28 @@ async def run_scoring(topic_id: str, title: str, description: str) -> dict:
         [{"credibility": c.get("credibility") or 50, "relevance": c.get("relevance") or 50,
           "sources": c.get("sources") or []} for c in clues]
     )
-    topic_str = f"{title}\n{description}".strip()
+    topic_str = (f"{title}\n{description}".strip()
+                 + await steering.steering_for(topic_id, "evidence"))
     parties_str = _parties_str(parties)
     evidence_str = _evidence_str(clues, density)
+
+    # If a forum debate ran, ground scenario synthesis in it (summary + endorsed outcomes).
+    forum = await reads.get_forum_session(topic_id)
+    forum_note = ""
+    if forum and (forum.get("debate_summary") or forum.get("scenarios")):
+        ends = "\n".join(
+            f"- {s['title']} (backed by: {', '.join(s.get('supported_by', [])) or '—'})"
+            for s in forum.get("scenarios", [])[:8]
+        )
+        forum_note = (
+            f"\n\n=== FORUM DEBATE ===\nSummary: {(forum.get('debate_summary') or '')[:1500]}\n"
+            f"Outcomes endorsed by the parties:\n{ends or '(none)'}\n"
+            "Use the debate to inform the candidate scenarios and which parties back each."
+        )
+        evidence_str += forum_note
     emit({"type": "think", "icon": "⚖", "label": "evidence assembled",
-          "detail": f"{len(clues)} clues · {density['source_clusters']} source clusters · {len(parties)} parties"})
+          "detail": f"{len(clues)} clues · {density['source_clusters']} clusters · {len(parties)} parties"
+                    f"{' · forum debate' if forum_note else ''}"})
 
     def _work() -> dict:
         dspy_lm.configure()

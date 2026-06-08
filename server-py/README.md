@@ -51,12 +51,39 @@ Closes the loop from clues to a probability-ranked verdict the React frontend re
   6 grounded scenarios summing to 100%, each with base rate + resolution criteria, persisted
   and read back through `get_expert_council` with a coherent assessment (`tests/smoke_scoring.py`).
 
-The current scoring stage is **forum-lite**: scenarios are synthesized directly from the
-parties + evidence. The full multi-turn adversarial **forum** (chairman + per-party
-representative turns, `forum_sessions`/`forum_turns`) is the next refinement.
+### Phase 3 — enrichment + full multi-party forum debate ✅
+- **Enrichment** (`POST /pipeline/enrich`): the STORM engine re-aimed at the *existing*
+  parties — deeper per-party grounded research distilling delta clues (deduped). Status
+  `review_parties → enrichment → review_enrichment`.
+- **Forum-prep** (`POST /pipeline/forum-prep`): the 5-factor influence model
+  (military / economic / information / international / internal, each 0–100, evidence-grounded)
+  → party `weight`; one debate **representative persona** per party with weight-proportional
+  speaking budgets (low-weight parties keep a floor). Status → `review_forum_prep`.
+- **Forum debate** (`POST /pipeline/forum`): a moderator frames the central question + points
+  of contention, then each representative speaks **in character** across opening → rebuttal →
+  closing, grounded in clue ids, challenging others by name. Turns persist to
+  `forum_rounds`/`forum_turns`, stream as `forum_turn` SSE; endorsed outcomes aggregate into
+  `forum_scenarios`; a synthesis writes the debate summary. Status → `review_forum`. The
+  scorer now **builds on the debate** (summary + endorsements) when present.
+- Read routes: `GET /forum[/:sessionId]`, `/representatives`. Bounded by
+  `DANA_FORUM_MAX_PARTIES`. Verified: forum-prep produced 9 differentiated reps; debate ran
+  opening/rebuttal/closing with grounded, in-character turns (`tests/smoke_forum.py`).
 
-Next: full forum debate + per-party enrichment; then calibration/steering/providers; then
-DSPy optimization (deferred — no resolved-forecast data yet, see REVIEW.md); then cutover.
+### Phase 4 — calibration · steering · providers · cutover ✅
+- **Calibration** (`/api/calibration`, `POST /resolve`, `GET/DELETE /resolution`): resolve a
+  topic's forecast → **Brier + log score**, plus a reliability curve across all resolutions.
+- **Steering** (`/api/settings`): operator `AnalystGuidance` (framing / research / evidence /
+  debate), global + per-topic, injected into discovery/forum/scoring prompts with a guardrail
+  ("guides method, not the conclusion").
+- **Providers** (`/api/providers/custom`, `/health`, `/models`): add/list/remove custom
+  OpenAI- and Anthropic-compatible API-key providers through the CLIProxyAPI management API
+  (keys never echoed — masked hint only). Lets an operator plug in e.g. a MiniMax key.
+- **Cutover**: `Dockerfile` + `docker-compose.yml` + `run.sh` run the Python backend on `:3001`
+  alongside the TS stack (non-destructive). With a built SPA present (`FRONTEND_DIST`) this one
+  process serves the React app + API — a drop-in replacement. See **Cutover** below.
+
+Deferred: DSPy optimization (no resolved-forecast data yet — bootstrap it via `/resolve`, then
+compile the scorer against Brier; see REVIEW.md).
 
 ## Run it (dev)
 
@@ -84,8 +111,37 @@ PY
 .venv/bin/python tests/smoke_dspy.py
 ```
 
-Point the frontend at the Python backend by changing the Vite dev-proxy target from
-`http://localhost:3000` to `http://localhost:3001` (no frontend code changes).
+Or just `./run.sh` (sets up the venv, copies the DB, serves with autoreload).
+
+### Drive the full pipeline
+
+```bash
+TID=$(curl -s localhost:3001/api/topics -H 'content-type: application/json' \
+       -d '{"title":"Will X happen by 2026?","description":"…"}' | jq -r .id)
+curl -s -XPOST localhost:3001/api/topics/$TID/pipeline/run          # discovery → enrich → forum-prep → forum → verdict
+curl -s localhost:3001/api/topics/$TID/stream                       # watch SSE (think/forum_turn/verdict_content)
+curl -s localhost:3001/api/topics/$TID/verdict | jq                 # ranked scenarios
+```
+
+Stages can also be run one gate at a time: `pipeline/{discover,enrich,forum-prep,forum,score}`.
+
+## Cutover (point the frontend at the Python backend)
+
+Non-destructive — the TS stack stays in the repo and keeps working.
+
+- **Dev:** change the Vite dev-proxy target in `app/frontend/vite.config.ts` from
+  `http://localhost:3000` to `http://localhost:3001`. No frontend code changes — it calls
+  relative `/api/...`.
+- **Prod (drop-in):** build the SPA (`cd app/frontend && bun run build`) and run the Python
+  container with `FRONTEND_DIST` pointing at `app/frontend/dist` (or mount it) — this one
+  process then serves the React app **and** the API:
+
+  ```bash
+  docker compose -f server-py/docker-compose.yml up --build   # API on :3001 (+ its own searxng on :8081)
+  ```
+
+  Point `PROXY_BASE_URL` at a running CLIProxyAPI (`:8317`). The compose mounts `server-py/data`
+  (a **copy** of the DB) — never the live shared file while the TS backend is running.
 
 ## Layout
 
@@ -96,8 +152,12 @@ src/dana/
   api/               # routers, 1:1 with the TS routes/ (same paths + JSON field names)
   events/bus.py      # thread-safe per-topic SSE pub/sub
   llm/lm.py          # single LM chokepoint -> CLIProxyAPI (+ model fallback)
-  db/                # async SQLAlchemy over the existing dana.db schema
-  pipeline/ research/ agents/ rigor/ optimize/ tools/ schemas/   # filled in by later phases
+  db/                # async reads + sync writers over the existing dana.db schema
+  research/          # STORM engine (personas → grounded conversation → clue distillation)
+  agents/            # DSPy modules: scenario_scorer, forum_prep (weights+reps), forum (debate)
+  pipeline/          # stages: discovery, enrichment, forum_prep, forum, scoring (+ runner)
+  rigor/             # independence dedup + calibration (Brier/log) — pure Python
+  llm/               # lm chokepoint, dspy_lm, steering, proxy_admin (CLIProxyAPI mgmt)
 docs/PLAN.md docs/REVIEW.md
-tests/smoke_dspy.py
+tests/smoke_{dspy,research,scoring,forum}.py
 ```

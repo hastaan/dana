@@ -6,13 +6,19 @@ prove the request -> DB / proxy / SSE plumbing. Subsequent phases mount the pipe
 research engine, forum, scoring, calibration, providers, and steering routers.
 """
 import asyncio
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
+from .api import calibration as calibration_api
 from .api import models as models_api
 from .api import pipeline as pipeline_api
+from .api import providers as providers_api
+from .api import settings as settings_api
 from .api import stream as stream_api
 from .api import topics as topics_api
 from .config import settings
@@ -43,11 +49,20 @@ def create_app() -> FastAPI:
     app.include_router(stream_api.router)
     app.include_router(models_api.router)
     app.include_router(pipeline_api.router)
+    app.include_router(calibration_api.router)
+    app.include_router(settings_api.router)
+    app.include_router(providers_api.router)
 
     @app.get("/health")
     @app.get("/api/health")
     async def health():
         return {"status": "ok"}
+
+    # Full-cutover mode: if a built React frontend is present, serve it as the SPA so this
+    # one process replaces the TS server entirely. Mounted LAST so /api/* routes win.
+    dist = os.getenv("FRONTEND_DIST") or str(Path(__file__).resolve().parents[3] / "app" / "frontend" / "dist")
+    if Path(dist).is_dir():
+        app.mount("/", StaticFiles(directory=dist, html=True), name="spa")
 
     return app
 

@@ -141,6 +141,30 @@ class StormResearchEngine:
             emit({"type": "clue_discovered", "clue": {"title": d.title, "persona": persona.name}})
         return clues
 
+    # ── Enrichment: deeper per-party research over EXISTING parties ──
+    def enrich(self, topic: str, description: str, parties: list[dict], emit: Emit) -> dict:
+        """Reuse the grounded conversation/distill loop, but seed personas from the parties
+        already discovered and aim questions at their vulnerabilities, capabilities, and
+        recent moves (delta clues). Parties are not re-discovered."""
+        gaps = [
+            "recent decisions, statements, and moves by this party",
+            "this party's vulnerabilities, constraints, and red lines",
+            "shifts in this party's capabilities or external support",
+        ]
+        personas = [
+            Persona("party", p["name"], p.get("agenda") or p.get("description") or "", ptype=p.get("type"),
+                    party_id=p["id"])
+            for p in parties[: self.cfg.max_personas]
+        ]
+        all_clues: list[dict] = []
+        for idx, persona in enumerate(personas):
+            emit({"type": "progress", "stage": "enrichment", "pct": 0.1 + 0.8 * idx / max(1, len(personas)),
+                  "msg": f"Enriching: {persona.name} ({idx + 1}/{len(personas)})"})
+            history = self._converse(topic, persona, gaps, emit)
+            all_clues.extend(self._distill_clues(topic, persona, history, emit))
+        return {"clues": all_clues, "searches_used": self.budget.searches_used,
+                "cache_hits": self.budget.cache_hits}
+
     # ── Orchestrate ──
     def run(self, topic: str, description: str, emit: Emit) -> dict:
         parties, personas, outline = self._seed_personas(topic, description, emit)

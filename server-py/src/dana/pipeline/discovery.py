@@ -7,7 +7,7 @@ import asyncio
 
 from ..db import writers
 from ..events.bus import bus
-from ..llm import dspy_lm
+from ..llm import dspy_lm, steering
 from ..research.engine import ResearchConfig, StormResearchEngine
 
 
@@ -15,6 +15,7 @@ async def run_discovery(topic_id: str, title: str, description: str, cfg: Resear
     def emit(ev: dict) -> None:
         bus.emit(topic_id, ev)
 
+    description = (description or "") + await steering.steering_for(topic_id, "research")
     writers.set_topic_status(topic_id, "discovery")
     emit({"type": "progress", "stage": "discovery", "pct": 0.0, "msg": "Starting discovery…"})
 

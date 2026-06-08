@@ -1,0 +1,46 @@
+# Python backend stack (runs ALONGSIDE the root TS compose — different ports, non-destructive).
+#
+#   docker compose -f server-py/docker-compose.yml up --build
+#
+# Expects a CLIProxyAPI reachable at PROXY_BASE_URL (default: host's :8317 via host-gateway).
+# Run the proxy standalone (see docs/PLAN.md) or point PROXY_BASE_URL at the root `dana` container.
+services:
+  server-py:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3001
+      DATA_DIR: /data
+      PROXY_BASE_URL: ${PROXY_BASE_URL:-http://host.docker.internal:8317}
+      SEARXNG_URL: http://searxng:8080
+      MANAGEMENT_SECRET: ${MANAGEMENT_SECRET:-}
+      # Optional full cutover: serve the built React SPA from this process.
+      FRONTEND_DIST: ${FRONTEND_DIST:-}
+    ports:
+      - "3001:3001"
+    volumes:
+      # IMPORTANT: a COPY of the DB, never the live shared data dir, while the TS backend runs.
+      - ./data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      searxng:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - dana-py-net
+
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8081:8080"   # 8081 on host to avoid clashing with the root compose's searxng
+    volumes:
+      - ../searxng/settings.yml:/etc/searxng/settings.yml:ro
+    restart: unless-stopped
+    networks:
+      - dana-py-net
+
+networks:
+  dana-py-net:
+    driver: bridge

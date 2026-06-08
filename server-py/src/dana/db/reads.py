@@ -51,6 +51,123 @@ async def list_clues(topic_id: str) -> list[dict]:
     return out
 
 
+async def list_representatives(topic_id: str) -> list[dict]:
+    async with get_engine().connect() as conn:
+        rows = (
+            await conn.execute(text("SELECT * FROM representatives WHERE topic_id=:t"), {"t": topic_id})
+        ).mappings().all()
+    return [{
+        "id": r["id"], "party_id": r["party_id"],
+        "persona_title": r["persona_title"], "persona_prompt": r["persona_prompt"],
+        "speaking_weight": r["speaking_weight"],
+        "speaking_budget": json.loads(r["speaking_budget"] or "{}"),
+        "auto_generated": bool(r["auto_generated"]),
+    } for r in rows]
+
+
+async def get_resolution(topic_id: str, version: int) -> dict | None:
+    async with get_engine().connect() as conn:
+        r = (await conn.execute(
+            text("SELECT * FROM forecast_resolutions WHERE topic_id=:t AND version=:v"),
+            {"t": topic_id, "v": version},
+        )).mappings().first()
+    if not r:
+        return None
+    return {
+        "topic_id": r["topic_id"], "version": r["version"], "resolved_scenario_id": r["resolved_scenario_id"],
+        "resolved_at": r["resolved_at"], "notes": r["notes"], "brier_score": r["brier_score"],
+        "log_score": r["log_score"], "forecast": json.loads(r["forecast"] or "[]"),
+    }
+
+
+async def list_resolutions() -> list[dict]:
+    async with get_engine().connect() as conn:
+        rows = (await conn.execute(text(
+            "SELECT fr.*, t.title AS topic_title FROM forecast_resolutions fr "
+            "LEFT JOIN topics t ON t.id = fr.topic_id ORDER BY fr.resolved_at DESC"
+        ))).mappings().all()
+    return [{
+        "topic_id": r["topic_id"], "version": r["version"], "resolved_scenario_id": r["resolved_scenario_id"],
+        "resolved_at": r["resolved_at"], "notes": r["notes"], "brier_score": r["brier_score"],
+        "log_score": r["log_score"], "forecast": json.loads(r["forecast"] or "[]"),
+        "topic_title": r["topic_title"],
+    } for r in rows]
+
+
+async def get_app_settings() -> dict | None:
+    async with get_engine().connect() as conn:
+        r = (await conn.execute(
+            text("SELECT value FROM app_settings WHERE key='app_settings'")
+        )).mappings().first()
+    return json.loads(r["value"]) if r else None
+
+
+def _turn_row(r) -> dict:
+    return {
+        "id": r["id"], "party_id": r["party_id"], "representative_id": r["representative_id"],
+        "party_name": r["party_name"], "persona_title": r["persona_title"], "position": r["position"],
+        "evidence": json.loads(r["evidence"] or "[]"), "challenges": json.loads(r["challenges"] or "[]"),
+        "concessions": json.loads(r["concessions"] or "[]"), "statement": r["statement"],
+        "scenario_endorsement": r["scenario_endorsement"], "clues_cited": json.loads(r["clues_cited"] or "[]"),
+        "word_count": r["word_count"], "round": r["round"], "type": r["type"], "timestamp": r["created_at"],
+        "moderator_directive": r["moderator_directive"], "moderator_reason": r["moderator_reason"],
+    }
+
+
+async def get_forum_session(topic_id: str, version: int | None = None, session_id: str | None = None) -> dict | None:
+    """⇄ dbGetForumSession — full nested ForumSession (rounds→turns, scenarios, summary)."""
+    async with get_engine().connect() as conn:
+        if session_id:
+            sess = (await conn.execute(
+                text("SELECT * FROM forum_sessions WHERE id=:s AND topic_id=:t"), {"s": session_id, "t": topic_id}
+            )).mappings().first()
+        elif version is not None:
+            sess = (await conn.execute(
+                text("SELECT * FROM forum_sessions WHERE topic_id=:t AND version=:v"), {"t": topic_id, "v": version}
+            )).mappings().first()
+        else:
+            sess = (await conn.execute(
+                text("SELECT * FROM forum_sessions WHERE topic_id=:t ORDER BY version DESC LIMIT 1"), {"t": topic_id}
+            )).mappings().first()
+        if not sess:
+            return None
+        sid = sess["id"]
+        rounds = (await conn.execute(
+            text("SELECT * FROM forum_rounds WHERE session_id=:s AND topic_id=:t ORDER BY round_number"),
+            {"s": sid, "t": topic_id},
+        )).mappings().all()
+        turns = (await conn.execute(
+            text("SELECT * FROM forum_turns WHERE topic_id=:t ORDER BY round_id, rowid"), {"t": topic_id}
+        )).mappings().all()
+        scen = (await conn.execute(
+            text("SELECT * FROM forum_scenarios WHERE session_id=:s AND topic_id=:t"), {"s": sid, "t": topic_id}
+        )).mappings().all()
+        summ = (await conn.execute(
+            text("SELECT summary FROM forum_scenario_summaries WHERE session_id=:s AND topic_id=:t"),
+            {"s": sid, "t": topic_id},
+        )).mappings().first()
+
+    turns_by_round: dict[int, list] = {}
+    for t in turns:
+        turns_by_round.setdefault(t["round_id"], []).append(_turn_row(t))
+    out_rounds = [{"round": r["round_number"], "type": r["round_type"],
+                   "turns": turns_by_round.get(r["id"], [])} for r in rounds]
+    scenarios = [{
+        "id": s["id"], "title": s["title"], "description": s["description"], "proposed_by": s["proposed_by"],
+        "supported_by": json.loads(s["supported_by"] or "[]"), "contested_by": json.loads(s["contested_by"] or "[]"),
+        "clues_cited": json.loads(s["clues_cited"] or "[]"), "benefiting_parties": json.loads(s["benefiting_parties"] or "[]"),
+        "required_conditions": json.loads(s["required_conditions"] or "[]"),
+        "falsification_conditions": json.loads(s["falsification_conditions"] or "[]"),
+    } for s in scen]
+    return {
+        "session_id": sid, "version": sess["version"], "type": sess["type"], "status": sess["status"],
+        "started_at": sess["started_at"], "completed_at": sess["completed_at"],
+        "rounds": out_rounds, "scenarios": scenarios,
+        "scenario_summary": json.loads(summ["summary"]) if summ else None,
+        "debate_summary": sess["debate_summary"],
+    }
+
+
 async def get_expert_council(topic_id: str, version: int | None = None) -> dict | None:
     """⇄ dbGet(Latest)ExpertCouncil — returns ExpertCouncilOutput or None."""
     async with get_engine().connect() as conn:

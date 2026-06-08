@@ -75,6 +75,32 @@ def set_parties(topic_id: str, parties: list[dict]) -> None:
             )
 
 
+def update_party_weight(topic_id: str, party_id: str, weight: float,
+                         weight_factors: dict, weight_evidence: dict) -> None:
+    with connect() as c:
+        c.execute(
+            "UPDATE parties SET weight=?, weight_factors=?, weight_evidence=? WHERE id=? AND topic_id=?",
+            (weight, json.dumps(weight_factors), json.dumps(weight_evidence), party_id, topic_id),
+        )
+
+
+def save_representatives(topic_id: str, reps: list[dict]) -> None:
+    """Replace the topic's representatives (⇄ dbSaveRepresentatives)."""
+    with connect() as c:
+        c.execute("DELETE FROM representatives WHERE topic_id=?", (topic_id,))
+        for r in reps:
+            c.execute(
+                "INSERT INTO representatives (id,topic_id,party_id,persona_title,persona_prompt,"
+                "speaking_weight,speaking_budget,auto_generated) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    r["id"], topic_id, r["party_id"], r.get("persona_title", ""),
+                    r.get("persona_prompt", ""), r.get("speaking_weight", 0),
+                    json.dumps(r.get("speaking_budget", {})),
+                    1 if r.get("auto_generated", True) else 0,
+                ),
+            )
+
+
 # ── Clues ─────────────────────────────────────────────────────────────────────
 def add_clue(topic_id: str, clue: dict) -> str:
     """Insert a clue + its v1 clue_version (⇄ storeClue). Returns clue_id."""
@@ -150,6 +176,92 @@ def corpus_store_search(topic_id: str, query: str, results: list[dict], stage: s
         )
 
 
+# ── Forum (⇄ db/queries/forum.ts) ──────────────────────────────────────────────
+def create_forum_session(topic_id: str, version: int, type_: str = "full") -> str:
+    session_id = f"forum-session-v{version}"
+    with connect() as c:
+        # Purge any prior artifacts for this session so re-runs don't accumulate / mix turns
+        # (the dev DB may already carry a forum from the TS backend under the same session id).
+        c.execute(
+            "DELETE FROM forum_turns WHERE topic_id=? AND round_id IN "
+            "(SELECT id FROM forum_rounds WHERE session_id=? AND topic_id=?)",
+            (topic_id, session_id, topic_id),
+        )
+        c.execute("DELETE FROM forum_rounds WHERE session_id=? AND topic_id=?", (session_id, topic_id))
+        c.execute("DELETE FROM forum_scenarios WHERE session_id=? AND topic_id=?", (session_id, topic_id))
+        c.execute("DELETE FROM forum_scenario_summaries WHERE session_id=? AND topic_id=?", (session_id, topic_id))
+        c.execute("DELETE FROM forum_sessions WHERE id=? AND topic_id=?", (session_id, topic_id))
+        c.execute(
+            "INSERT INTO forum_sessions (id,topic_id,version,type,status,started_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (session_id, topic_id, version, type_, "running", ISO()),
+        )
+    return session_id
+
+
+def add_forum_round(session_id: str, topic_id: str, round_number: int, round_type: str = "debate") -> int:
+    with connect() as c:
+        cur = c.execute(
+            "INSERT INTO forum_rounds (session_id,topic_id,round_number,round_type) VALUES (?,?,?,?)",
+            (session_id, topic_id, round_number, round_type),
+        )
+        return cur.lastrowid
+
+
+def add_forum_turn(topic_id: str, round_id: int, turn: dict) -> None:
+    with connect() as c:
+        c.execute(
+            "INSERT INTO forum_turns (id,round_id,topic_id,party_id,representative_id,party_name,"
+            "persona_title,position,evidence,challenges,concessions,statement,scenario_endorsement,"
+            "clues_cited,word_count,round,type,created_at,moderator_directive,moderator_reason)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                turn["id"], round_id, topic_id, turn["party_id"], turn["representative_id"],
+                turn.get("party_name", ""), turn.get("persona_title"), turn.get("position"),
+                json.dumps(turn.get("evidence", [])), json.dumps(turn.get("challenges", [])),
+                json.dumps(turn.get("concessions", [])), turn.get("statement", ""),
+                turn.get("scenario_endorsement"), json.dumps(turn.get("clues_cited", [])),
+                turn.get("word_count", 0), turn.get("round", 1), turn.get("type", "other"),
+                ISO(), turn.get("moderator_directive"), turn.get("moderator_reason"),
+            ),
+        )
+
+
+def save_forum_scenarios(session_id: str, topic_id: str, scenarios: list[dict]) -> None:
+    with connect() as c:
+        c.execute("DELETE FROM forum_scenarios WHERE session_id=? AND topic_id=?", (session_id, topic_id))
+        for s in scenarios:
+            c.execute(
+                "INSERT INTO forum_scenarios (id,session_id,topic_id,title,description,proposed_by,"
+                "supported_by,contested_by,clues_cited,benefiting_parties,required_conditions,"
+                "falsification_conditions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    s["id"], session_id, topic_id, s.get("title", ""), s.get("description", ""),
+                    s.get("proposed_by", ""), json.dumps(s.get("supported_by", [])),
+                    json.dumps(s.get("contested_by", [])), json.dumps(s.get("clues_cited", [])),
+                    json.dumps(s.get("benefiting_parties", [])), json.dumps(s.get("required_conditions", [])),
+                    json.dumps(s.get("falsification_conditions", [])),
+                ),
+            )
+
+
+def save_forum_scenario_summary(session_id: str, topic_id: str, summary: dict) -> None:
+    with connect() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO forum_scenario_summaries (session_id,topic_id,summary)"
+            " VALUES (?,?,?)",
+            (session_id, topic_id, json.dumps(summary)),
+        )
+
+
+def complete_forum_session(session_id: str, topic_id: str, debate_summary: str | None) -> None:
+    with connect() as c:
+        c.execute(
+            "UPDATE forum_sessions SET status=?, completed_at=?, debate_summary=? WHERE id=? AND topic_id=?",
+            ("complete", ISO(), debate_summary, session_id, topic_id),
+        )
+
+
 # ── Verdict (⇄ dbSaveExpertCouncil) ────────────────────────────────────────────
 def save_verdict(
     topic_id: str,
@@ -196,6 +308,43 @@ def save_verdict(
             ),
         )
     return verdict_id
+
+
+# ── Calibration (⇄ db/queries/calibration.ts) ──────────────────────────────────
+def save_forecast_resolution(topic_id: str, version: int, resolved_scenario_id: str,
+                             forecast: list[dict], brier_score: float,
+                             log_score: float | None, notes: str | None) -> None:
+    with connect() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO forecast_resolutions "
+            "(topic_id,version,resolved_scenario_id,resolved_at,notes,brier_score,log_score,forecast)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (topic_id, version, resolved_scenario_id, ISO(), notes, brier_score, log_score,
+             json.dumps(forecast)),
+        )
+
+
+def delete_forecast_resolution(topic_id: str, version: int) -> bool:
+    with connect() as c:
+        cur = c.execute(
+            "DELETE FROM forecast_resolutions WHERE topic_id=? AND version=?", (topic_id, version)
+        )
+        return cur.rowcount > 0
+
+
+# ── App settings / steering (⇄ db/queries/settings.ts) ──────────────────────────
+def set_app_settings(value: dict) -> None:
+    with connect() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO app_settings (key,value) VALUES ('app_settings', ?)",
+            (json.dumps(value),),
+        )
+
+
+def set_topic_settings(topic_id: str, settings: dict) -> None:
+    with connect() as c:
+        c.execute("UPDATE topics SET settings=?, updated_at=? WHERE id=?",
+                  (json.dumps(settings), ISO(), topic_id))
 
 
 def corpus_get_page(topic_id: str, url: str) -> dict | None:

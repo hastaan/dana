@@ -6,7 +6,7 @@ run_id matches the TS contract exactly: the literal stage name ("discover").
 from fastapi import APIRouter, HTTPException
 
 from ..db import topics as topics_repo
-from ..pipeline import discovery, scoring
+from ..pipeline import discovery, enrichment, forum, forum_prep, scoring
 from ..pipeline.runner import registry
 
 router = APIRouter()
@@ -42,15 +42,61 @@ async def score(topic_id: str):
     return started
 
 
-@router.post("/api/topics/{topic_id}/pipeline/analyze")
-async def analyze(topic_id: str):
-    """Everything after party review → verdict (⇄ runAnalyzeStages). With the Phase-2
-    forum-lite scorer this is the scoring stage; the full forum debate is a later split."""
+@router.post("/api/topics/{topic_id}/pipeline/enrich")
+async def enrich(topic_id: str):
     topic = await topics_repo.get_topic(topic_id)
     if topic is None:
         raise HTTPException(status_code=404, detail={"message": "Topic not found"})
 
     async def work() -> None:
+        await enrichment.run_enrichment(topic_id, topic["title"], topic["description"])
+
+    started = await registry.start(topic_id, "enrich", work)
+    if started is None:
+        raise HTTPException(status_code=409, detail={"message": "Pipeline already running"})
+    return started
+
+
+@router.post("/api/topics/{topic_id}/pipeline/forum-prep")
+async def forum_prep_stage(topic_id: str):
+    topic = await topics_repo.get_topic(topic_id)
+    if topic is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+
+    async def work() -> None:
+        await forum_prep.run_forum_prep(topic_id, topic["title"], topic["description"])
+
+    started = await registry.start(topic_id, "forum-prep", work)
+    if started is None:
+        raise HTTPException(status_code=409, detail={"message": "Pipeline already running"})
+    return started
+
+
+@router.post("/api/topics/{topic_id}/pipeline/forum")
+async def forum_stage(topic_id: str):
+    topic = await topics_repo.get_topic(topic_id)
+    if topic is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+
+    async def work() -> None:
+        await forum.run_forum(topic_id, topic["title"], topic["description"])
+
+    started = await registry.start(topic_id, "forum", work)
+    if started is None:
+        raise HTTPException(status_code=409, detail={"message": "Pipeline already running"})
+    return started
+
+
+@router.post("/api/topics/{topic_id}/pipeline/analyze")
+async def analyze(topic_id: str):
+    """Everything after party review → verdict (⇄ runAnalyzeStages): forum-prep → forum → score."""
+    topic = await topics_repo.get_topic(topic_id)
+    if topic is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+
+    async def work() -> None:
+        await forum_prep.run_forum_prep(topic_id, topic["title"], topic["description"])
+        await forum.run_forum(topic_id, topic["title"], topic["description"])
         await scoring.run_scoring(topic_id, topic["title"], topic["description"])
 
     started = await registry.start(topic_id, "analyze", work)
@@ -61,13 +107,16 @@ async def analyze(topic_id: str):
 
 @router.post("/api/topics/{topic_id}/pipeline/run")
 async def run_full(topic_id: str):
-    """Full pipeline in one shot (⇄ runFullPipeline): discovery → verdict, gates auto-passed."""
+    """Full pipeline in one shot (⇄ runFullPipeline): discovery → forum-prep → forum → verdict."""
     topic = await topics_repo.get_topic(topic_id)
     if topic is None:
         raise HTTPException(status_code=404, detail={"message": "Topic not found"})
 
     async def work() -> None:
         await discovery.run_discovery(topic_id, topic["title"], topic["description"])
+        await enrichment.run_enrichment(topic_id, topic["title"], topic["description"])
+        await forum_prep.run_forum_prep(topic_id, topic["title"], topic["description"])
+        await forum.run_forum(topic_id, topic["title"], topic["description"])
         await scoring.run_scoring(topic_id, topic["title"], topic["description"])
 
     started = await registry.start(topic_id, "run", work)
