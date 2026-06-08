@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-# Pinned to v6.9.4 — Dana's provider/custom-provider management is built against this
-# version's management API (/v0/management/openai-compatibility, /claude-api-key,
-# /auth-files, *-auth-url). Newer "latest" (v7.x) removed some of those endpoints, so
-# do NOT float to :latest without re-validating routes/providers.ts + routes/customProviders.ts.
-FROM eceasy/cli-proxy-api@sha256:dbb1bc7d77f77aa1e9676872af15e18970ab30162649480126efc62ced224f11 AS proxy
+# CLIProxyAPI provides the OAuth + custom-provider management API that Dana drives
+# (/v0/management/{openai-compatibility,claude-api-key,auth-files,*-auth-url}). These
+# endpoints only register when remote-management.secret-key is set — the entrypoint
+# does that. Tracks :latest (validated against v7.1.x and v6.9.x).
+FROM eceasy/cli-proxy-api:latest AS proxy
 
 FROM oven/bun:1-alpine AS builder
 WORKDIR /app
@@ -15,7 +15,11 @@ RUN cd app/frontend && bun install --frozen-lockfile
 COPY app/frontend/ app/frontend/
 RUN cd app/frontend && bun run build
 
-FROM oven/bun:1-alpine
+# glibc (Debian) runtime — the CLIProxyAPI binary (v7.x) is dynamically linked against
+# glibc, so it can't run on a musl/alpine base. wget is needed by the healthcheck and
+# the entrypoint's proxy-readiness probe.
+FROM oven/bun:1
+RUN apt-get update && apt-get install -y --no-install-recommends wget ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV PORT=3000 DATA_DIR=/data PROXY_BASE_URL=http://127.0.0.1:8317 SEARXNG_URL=http://searxng:8080 FIRECRAWL_URL="" FIRECRAWL_API_KEY=""
 
