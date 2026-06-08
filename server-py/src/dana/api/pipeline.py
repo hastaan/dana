@@ -6,7 +6,7 @@ run_id matches the TS contract exactly: the literal stage name ("discover").
 from fastapi import APIRouter, HTTPException
 
 from ..db import topics as topics_repo
-from ..pipeline import discovery
+from ..pipeline import discovery, scoring
 from ..pipeline.runner import registry
 
 router = APIRouter()
@@ -22,6 +22,21 @@ async def discover(topic_id: str):
         await discovery.run_discovery(topic_id, topic["title"], topic["description"])
 
     started = await registry.start(topic_id, "discover", work)
+    if started is None:
+        raise HTTPException(status_code=409, detail={"message": "Pipeline already running"})
+    return started
+
+
+@router.post("/api/topics/{topic_id}/pipeline/score")
+async def score(topic_id: str):
+    topic = await topics_repo.get_topic(topic_id)
+    if topic is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+
+    async def work() -> None:
+        await scoring.run_scoring(topic_id, topic["title"], topic["description"])
+
+    started = await registry.start(topic_id, "score", work)
     if started is None:
         raise HTTPException(status_code=409, detail={"message": "Pipeline already running"})
     return started

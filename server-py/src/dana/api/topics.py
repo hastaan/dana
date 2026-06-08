@@ -41,3 +41,29 @@ async def get_parties(topic_id: str):
 @router.get("/api/topics/{topic_id}/clues")
 async def get_clues(topic_id: str):
     return await reads.list_clues(topic_id)
+
+
+# ── Verdict / expert council (⇄ TS expertCouncil.ts) ───────────────────────────
+@router.get("/api/topics/{topic_id}/expert-council")
+async def get_expert_council(topic_id: str):
+    return await reads.get_expert_council(topic_id)
+
+
+@router.get("/api/topics/{topic_id}/expert-council/{version}")
+async def get_expert_council_version(topic_id: str, version: int):
+    data = await reads.get_expert_council(topic_id, version)
+    if data is None:
+        raise HTTPException(status_code=404, detail={"message": "Expert council not found for this version"})
+    return data
+
+
+@router.get("/api/topics/{topic_id}/verdict")
+async def get_verdict(topic_id: str):
+    council = await reads.get_expert_council(topic_id)
+    return council.get("final_verdict") if council else None
+
+
+@router.get("/api/topics/{topic_id}/verdict/{version}")
+async def get_verdict_version(topic_id: str, version: int):
+    council = await reads.get_expert_council(topic_id, version)
+    return council.get("final_verdict") if council else None

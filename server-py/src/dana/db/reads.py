@@ -1,4 +1,4 @@
-"""Async read helpers for parties and clues (current version), shaped for the API."""
+"""Async read helpers for parties, clues, and verdicts (shaped for the API ⇄ TS)."""
 import json
 
 from sqlalchemy import text
@@ -49,3 +49,50 @@ async def list_clues(topic_id: str) -> list[dict]:
             "sources": [s.get("url") for s in cred.get("origin_sources", [])],
         })
     return out
+
+
+async def get_expert_council(topic_id: str, version: int | None = None) -> dict | None:
+    """⇄ dbGet(Latest)ExpertCouncil — returns ExpertCouncilOutput or None."""
+    async with get_engine().connect() as conn:
+        if version is None:
+            vrow = (
+                await conn.execute(
+                    text("SELECT version FROM expert_councils WHERE topic_id=:t ORDER BY version DESC LIMIT 1"),
+                    {"t": topic_id},
+                )
+            ).mappings().first()
+            if not vrow:
+                return None
+            version = vrow["version"]
+        council = (
+            await conn.execute(
+                text("SELECT * FROM expert_councils WHERE topic_id=:t AND version=:v"),
+                {"t": topic_id, "v": version},
+            )
+        ).mappings().first()
+        if not council:
+            return None
+        verdict = (
+            await conn.execute(
+                text("SELECT * FROM final_verdicts WHERE council_id=:c"), {"c": council["id"]}
+            )
+        ).mappings().first()
+    final_verdict = None
+    if verdict:
+        final_verdict = {
+            "synthesized_at": verdict["synthesized_at"],
+            "scenarios_ranked": json.loads(verdict["scenarios_ranked"] or "[]"),
+            "final_assessment": verdict["final_assessment"],
+            "confidence_note": verdict["confidence_note"],
+            "weight_challenge_decisions": json.loads(verdict["weight_challenge_decisions"] or "[]"),
+            "debate_summary": verdict["debate_summary"],
+            "steering": json.loads(verdict["steering"]) if verdict["steering"] else None,
+        }
+    return {
+        "version": council["version"],
+        "verdict_id": council["verdict_id"] or f"verdict-v{council['version']}",
+        "experts": json.loads(council["experts"] or "[]"),
+        "deliberations": [],
+        "final_verdict": final_verdict,
+        "evidence_map": json.loads(council["evidence_map"]) if council["evidence_map"] else [],
+    }

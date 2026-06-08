@@ -150,6 +150,54 @@ def corpus_store_search(topic_id: str, query: str, results: list[dict], stage: s
         )
 
 
+# ── Verdict (⇄ dbSaveExpertCouncil) ────────────────────────────────────────────
+def save_verdict(
+    topic_id: str,
+    version: int,
+    experts: list[dict],
+    scenarios_ranked: list[dict],
+    final_assessment: str,
+    confidence_note: str,
+    evidence_map: list[dict] | None = None,
+    debate_summary: str | None = None,
+) -> str:
+    """Replace topic+version's expert_council + final_verdict (allows re-runs). Returns
+    verdict_id. Drops any stale forecast_resolutions for the version (probabilities change)."""
+    now = ISO()
+    verdict_id = f"verdict-v{version}"
+    with connect() as c:
+        ex = c.execute(
+            "SELECT id FROM expert_councils WHERE topic_id=? AND version=?", (topic_id, version)
+        ).fetchone()
+        if ex:
+            cid = ex["id"]
+            c.execute("DELETE FROM final_verdicts WHERE council_id=?", (cid,))
+            c.execute("DELETE FROM expert_assessments WHERE council_id=?", (cid,))
+            c.execute("DELETE FROM expert_councils WHERE id=?", (cid,))
+            if c.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='forecast_resolutions'"
+            ).fetchone():
+                c.execute(
+                    "DELETE FROM forecast_resolutions WHERE topic_id=? AND version=?", (topic_id, version)
+                )
+        cur = c.execute(
+            "INSERT INTO expert_councils (topic_id,version,verdict_id,created_at,experts,evidence_map)"
+            " VALUES (?,?,?,?,?,?)",
+            (topic_id, version, verdict_id, now, json.dumps(experts), json.dumps(evidence_map or [])),
+        )
+        council_id = cur.lastrowid
+        c.execute(
+            "INSERT INTO final_verdicts (council_id,topic_id,synthesized_at,scenarios_ranked,"
+            "final_assessment,confidence_note,weight_challenge_decisions,debate_summary,steering)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                council_id, topic_id, now, json.dumps(scenarios_ranked),
+                final_assessment, confidence_note, "[]", debate_summary, None,
+            ),
+        )
+    return verdict_id
+
+
 def corpus_get_page(topic_id: str, url: str) -> dict | None:
     with connect() as c:
         row = c.execute(
