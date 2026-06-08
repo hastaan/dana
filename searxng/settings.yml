@@ -1,22 +1,12 @@
 # SearXNG config for Dana's JSON-API use.
 #
-# Reality: scraped engines rate-limit / CAPTCHA from a single server IP — no config fully
-# stops that. The DURABLE robustness lives in Dana (web_search retries, tolerates empty, never
-# cascades to a Brave scrape). Here we just (a) keep a BROAD whitelist so when some engines are
-# suspended others still answer, and (b) drop the worst offenders that only spam logs:
-# DuckDuckGo (CAPTCHA tracebacks), the onion engines, aol, karmasearch, etc.
-use_default_settings:
-  engines:
-    keep_only:
-      - google
-      - bing
-      - brave
-      - startpage
-      - qwant
-      - mojeek
-      - wikipedia
-      # duckduckgo intentionally omitted — it only returns CAPTCHA from a server IP (0 results,
-      # noisy tracebacks). Re-add if you run SearXNG behind a residential IP / proxy pool.
+# Keep the BROAD default engine set (use_default_settings: true) for resilience: many engines
+# means some always answer even when a few are momentarily rate-limited. Narrowing to a small
+# whitelist was a mistake — `keep_only` doesn't enable engines that ship disabled-by-default
+# (bing/qwant/mojeek), so it collapsed the active set to ~4 and starved results. We only turn
+# OFF the engines that produce pure log spam from a server IP (DuckDuckGo's CAPTCHA tracebacks).
+# Dana's web_search tolerates any single engine failing, so breadth here is the robustness.
+use_default_settings: true
 
 search:
   formats:
@@ -27,3 +17,9 @@ search:
 server:
   limiter: false
   secret_key: "4ced9d1ff16fbce79a94aea9c729277b6f755f02c68fd973"
+
+engines:
+  - name: duckduckgo
+    engine: duckduckgo
+    disabled: true
+    shortcut: ddg
