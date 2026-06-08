@@ -77,12 +77,39 @@ class StormResearchEngine:
         self.researcher = GroundedResearcher(self.retriever)
         self.distill = dspy.ChainOfThought(sig.DistillClues)
 
+    # ── Phase 0: ground party-finding in real web evidence (workflow: discovery → deep research) ──
+    def _ground_topic(self, topic: str, emit: Emit) -> str:
+        """A bounded grounded pass BEFORE seeding so parties are discovered from real reporting,
+        not LLM priors. Uses the same grounded researcher (deep_lookup primitive); shares the
+        search budget; degrades to '' when search is unavailable (then seeding proceeds as before)."""
+        if os.getenv("DANA_GROUND_DISCOVERY", "1") == "0":
+            return ""
+        questions = [
+            f"Who are the key parties, actors, states, and organizations involved in: {topic}?",
+            f"What are the most important recent developments, events, and facts about: {topic}?",
+        ]
+        bits: list[str] = []
+        for q in questions:
+            if not self.budget.can_search():
+                break
+            try:
+                r = self.researcher(topic=topic, question=q, persona="situation analyst")
+            except Exception:  # noqa: BLE001
+                continue
+            if r.answer and "INSUFFICIENT_EVIDENCE" not in r.answer:
+                bits.append(f"- {r.answer[:600]}")
+                emit({"type": "think", "icon": "🌐", "label": "Grounding discovery", "detail": q[:80]})
+        return ("Researched real-world context (use these facts to identify the actual parties):\n"
+                + "\n".join(bits)) if bits else ""
+
     # ── Phase 1: perspective seeding ──
     def _seed_personas(self, topic: str, description: str, emit: Emit):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        grounding = self._ground_topic(topic, emit)
+        desc = f"{description}\n\n{grounding}".strip() if grounding else description
         emit({"type": "think", "icon": "🧭", "label": "Surveying analogous cases", "detail": topic[:60]})
-        analogues = self.survey(topic=topic, description=description, today=today).analogues
-        seeded = self.seed(topic=topic, description=description, analogues=analogues)
+        analogues = self.survey(topic=topic, description=desc, today=today).analogues
+        seeded = self.seed(topic=topic, description=desc, analogues=analogues)
         personas: list[Persona] = []
         parties: list[dict] = []
         for p in seeded.parties[: self.cfg.max_personas]:
