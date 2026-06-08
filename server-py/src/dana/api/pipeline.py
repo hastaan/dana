@@ -42,6 +42,40 @@ async def score(topic_id: str):
     return started
 
 
+@router.post("/api/topics/{topic_id}/pipeline/analyze")
+async def analyze(topic_id: str):
+    """Everything after party review → verdict (⇄ runAnalyzeStages). With the Phase-2
+    forum-lite scorer this is the scoring stage; the full forum debate is a later split."""
+    topic = await topics_repo.get_topic(topic_id)
+    if topic is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+
+    async def work() -> None:
+        await scoring.run_scoring(topic_id, topic["title"], topic["description"])
+
+    started = await registry.start(topic_id, "analyze", work)
+    if started is None:
+        raise HTTPException(status_code=409, detail={"message": "Pipeline already running"})
+    return started
+
+
+@router.post("/api/topics/{topic_id}/pipeline/run")
+async def run_full(topic_id: str):
+    """Full pipeline in one shot (⇄ runFullPipeline): discovery → verdict, gates auto-passed."""
+    topic = await topics_repo.get_topic(topic_id)
+    if topic is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+
+    async def work() -> None:
+        await discovery.run_discovery(topic_id, topic["title"], topic["description"])
+        await scoring.run_scoring(topic_id, topic["title"], topic["description"])
+
+    started = await registry.start(topic_id, "run", work)
+    if started is None:
+        raise HTTPException(status_code=409, detail={"message": "Pipeline already running"})
+    return started
+
+
 @router.get("/api/topics/{topic_id}/pipeline/status")
 async def status(topic_id: str):
     run = registry.active(topic_id)

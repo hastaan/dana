@@ -34,9 +34,29 @@ streaming `think`/`progress`/`clue_discovered`/`stage_complete` SSE events.
 - Verified end-to-end: `tests/smoke_research.py` (real SearXNG → grounded answers →
   distilled clues persisted). Quality sample: 10 parties + 6 lenses + 8-section outline.
 
-Next: Phase 2 = forum (multi-party debate) + scoring parity; then calibration/steering/
-providers; then DSPy optimization (deferred — no resolved-forecast data yet, see REVIEW.md);
-then cutover.
+### Phase 2 — scenario synthesis + scoring → verdict ✅
+Closes the loop from clues to a probability-ranked verdict the React frontend renders.
+- `agents/scenario_scorer.py` (DSPy): synthesize 3–6 distinct, mutually-exclusive outcome
+  scenarios from the parties' agendas + the evidence, then score each — probability,
+  confidence, reference-class **base rate** + reasoning, objective **resolution criteria**/
+  date, key drivers, watch indicators, cited evidence chain. Probabilities normalized to
+  1.0 in pure Python (the LLM is never trusted to make them sum).
+- `rigor/dedup.py` (Enh 4e): **independent evidence density** — clusters clues by *primary*
+  source domain so single-cluster corroboration reads as weak; fed to the scorer as a note.
+- Wired as the scoring stage: `POST /api/topics/{id}/pipeline/{score,analyze,run}` →
+  status `expert_council` → `complete`, streaming `verdict_content`. Verdict persisted to
+  `expert_councils` + `final_verdicts`; readable via `GET /verdict[/:v]`, `/expert-council[/:v]`.
+- `POST /pipeline/run` chains discovery → verdict in one shot.
+- Verified end-to-end on the live dev DB (IRI-regime-collapse, 78 clues / 9 parties):
+  6 grounded scenarios summing to 100%, each with base rate + resolution criteria, persisted
+  and read back through `get_expert_council` with a coherent assessment (`tests/smoke_scoring.py`).
+
+The current scoring stage is **forum-lite**: scenarios are synthesized directly from the
+parties + evidence. The full multi-turn adversarial **forum** (chairman + per-party
+representative turns, `forum_sessions`/`forum_turns`) is the next refinement.
+
+Next: full forum debate + per-party enrichment; then calibration/steering/providers; then
+DSPy optimization (deferred — no resolved-forecast data yet, see REVIEW.md); then cutover.
 
 ## Run it (dev)
 
