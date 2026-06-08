@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api import models as models_api
+from .api import pipeline as pipeline_api
 from .api import stream as stream_api
 from .api import topics as topics_api
 from .config import settings
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
     app.include_router(topics_api.router)
     app.include_router(stream_api.router)
     app.include_router(models_api.router)
+    app.include_router(pipeline_api.router)
 
     @app.get("/health")
     @app.get("/api/health")

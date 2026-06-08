@@ -11,16 +11,32 @@ The React frontend and the existing `dana.db` are unchanged: this backend reimpl
 the **same REST + SSE contract**, so pointing the frontend at it is a one-line Vite/
 proxy flip. The current TS backend keeps running until the Python one reaches parity.
 
-## Status — Phase 0 (plumbing) ✅
+## Status
 
-Running and verified:
-- FastAPI app (`uvicorn dana.main:app`) on `:3001` with open CORS.
-- `GET /health`, `GET /api/topics`, `GET /api/topics/{id}`, `GET /api/models` — contract-matching JSON, real data from the DB.
-- `GET /api/topics/{id}/stream` — SSE with the unnamed-event + 15s-ping contract.
-- Thread-safe per-topic event bus (`events/bus.py`), single LM chokepoint (`llm/lm.py`) → CLIProxyAPI with model-availability fallback.
-- **DSPy → CLIProxyAPI typed-signature path proven** (`tests/smoke_dspy.py`): a `dspy.Signature` returns typed fields through `minimax-m3`, replacing the TS backend's JSON-regex parsing.
+### Phase 0 — plumbing ✅
+- FastAPI app (`uvicorn dana.main:app`) on `:3001`, open CORS.
+- `GET /health`, `/api/topics`, `/api/topics/{id}`, `/api/models` — contract-matching JSON, real data.
+- `GET /api/topics/{id}/stream` — SSE (unnamed events + 15s ping) via a thread-safe per-topic bus.
+- Single LM chokepoint (`llm/lm.py`, `llm/dspy_lm.py`) → CLIProxyAPI with model-availability fallback.
+- **DSPy → CLIProxyAPI typed-signature path proven** (`tests/smoke_dspy.py`).
 
-Next: Phase 1 = the STORM research engine (Discovery + Enrichment) end-to-end producing clues; then forum + scoring parity; then calibration/steering/providers; then DSPy optimization (deferred until resolved-forecast data exists — see REVIEW.md) and cutover.
+### Phase 1 — STORM research engine ✅ (Discovery)
+The centerpiece. `research/` implements STORM adapted to Dana's adversarial frame:
+analogous-case survey → **personas (parties + analytical lenses)** → **grounded
+analyst↔researcher conversations** (one question at a time, answers only from web
+search, refuse-to-hallucinate) → **clue distillation**. Wired as the Discovery stage:
+`POST /api/topics/{id}/pipeline/discover` → produces parties + clues persisted to the DB,
+streaming `think`/`progress`/`clue_discovered`/`stage_complete` SSE events.
+- Typed DSPy `Signature`s (Pydantic `OutputField`s) replace JSON-regex parsing.
+- `tools/web_search.py` (SearXNG→Brave), corpus-cached retriever (`research/retriever.py`)
+  dedupes fetches across conversations.
+- Env-tunable budget (`DANA_RESEARCH_MAX_PERSONAS|MAX_TURNS|TOP_K|MAX_SEARCHES`).
+- Verified end-to-end: `tests/smoke_research.py` (real SearXNG → grounded answers →
+  distilled clues persisted). Quality sample: 10 parties + 6 lenses + 8-section outline.
+
+Next: Phase 2 = forum (multi-party debate) + scoring parity; then calibration/steering/
+providers; then DSPy optimization (deferred — no resolved-forecast data yet, see REVIEW.md);
+then cutover.
 
 ## Run it (dev)
 
