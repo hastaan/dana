@@ -112,8 +112,10 @@ Every layer, existing (✓) and to-add (＋):
    into the **Python** LM (py has none today).
 2. **Search** — ＋make SearXNG **failure-tolerant**: return partial/empty instead of
    cascading to a Brave **scrape** (the 429 source); ＋`backoff` retry; ＋trim
-   `searxng/settings.yml` engines (disable DuckDuckGo, stop merging all defaults); demote
-   Brave-scrape to genuine last resort.
+   `searxng/settings.yml` engines (`keep_only` whitelist, drop DuckDuckGo); demote Brave-scrape
+   to genuine last resort; ＋**pace live searches** (`DANA_SEARCH_SPACING_S`, default 1s) so a
+   burst from one tier doesn't trip per-engine rate-limit suspensions on a single server IP —
+   the dominant cause of empty results under load.
 3. **Fetch** — ✓Firecrawl/localfirecrawl → trafilatura → Jina → raw; ＋backoff; ✓paywall
    handling; ＋bounded concurrency on multi-URL fetches.
 4. **Source quality** — ＋port STORM's `GENERALLY_UNRELIABLE | DEPRECATED | BLACKLISTED`

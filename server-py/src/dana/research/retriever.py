@@ -3,12 +3,18 @@
 STORM's many conversations dedupe through the corpus exactly like the TS agentic loop:
 check research_searches first, fall back to live SearXNG, store the result.
 """
+import os
+import time
 from dataclasses import dataclass, field
 
 from ..db import writers
 from ..rigor.sources import is_valid_source
 from ..tools.http_fetch import http_fetch
 from ..tools.web_search import web_search
+
+# Space out LIVE searches so a burst doesn't trip per-engine rate-limit suspensions on a
+# single server IP (the dominant cause of empty results under load). Cache hits skip it.
+_SEARCH_SPACING_S = float(os.getenv("DANA_SEARCH_SPACING_S", "1.0"))
 
 
 @dataclass
@@ -58,6 +64,7 @@ class DanaRetriever:
     def retrieve(self, queries: list[str], persona: str = "") -> list[Information]:
         seen: set[str] = set()
         out: list[Information] = []
+        did_live = False
         for q in queries:
             q = q.strip()
             if not q:
@@ -69,9 +76,12 @@ class DanaRetriever:
             else:
                 if not self.budget.can_search():
                     continue
+                if did_live and _SEARCH_SPACING_S > 0:
+                    time.sleep(_SEARCH_SPACING_S)  # pace bursts to avoid rate-limit suspensions
                 try:
                     results = web_search(q, num_results=self.top_k)
                     self.budget.searches_used += 1
+                    did_live = True
                     writers.corpus_store_search(self.topic_id, q, results)
                 except Exception:  # noqa: BLE001
                     results = []
