@@ -1,9 +1,40 @@
 """Async read helpers for parties, clues, and verdicts (shaped for the API ⇄ TS)."""
 import json
+import sqlite3
+import time
+from datetime import datetime
 
 from sqlalchemy import text
 
+from . import writers
 from .engine import get_engine
+from .sync_db import connect
+
+
+# ── Synthesis cache read (sync — called from the engine worker thread; mirrors
+#    corpus_find_search's age check; re-uses research_pages via a synthetic url) ──
+def get_cached_synthesis(topic_id: str, level: str, query: str,
+                         max_age_hours: float = 24.0) -> dict | None:
+    """Return a previously cached synthesized output (deep_lookup answer / deep_search
+    briefing) or None when absent or older than the TTL. Keyed by tier+query (global, not
+    topic-scoped) so the HTTP facade's ad-hoc lookups share cache with pipeline calls."""
+    try:
+        with connect() as c:
+            row = c.execute(
+                "SELECT content, fetched_at FROM synthesis_cache WHERE key=?",
+                (writers.synthesis_url(level, query),),
+            ).fetchone()
+    except sqlite3.Error:
+        return None  # table not created yet (no writes) → cache miss
+    if not row:
+        return None
+    try:
+        age = time.time() - datetime.fromisoformat(row["fetched_at"]).timestamp()
+        if age > max_age_hours * 3600:
+            return None
+        return json.loads(row["content"])
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
 
 
 async def list_parties(topic_id: str) -> list[dict]:

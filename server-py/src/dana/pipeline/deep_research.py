@@ -20,7 +20,7 @@ async def run_deep_research(topic_id: str, title: str, description: str, breadth
     emit({"type": "progress", "stage": "deep_research", "pct": 0.0, "msg": "Deep research…"})
 
     def _work() -> dict:
-        return deep_search(subject, breadth=breadth, topic_id=topic_id)
+        return deep_search(subject, breadth=breadth, topic_id=topic_id, emit=emit)
 
     res = await asyncio.to_thread(_work)
 

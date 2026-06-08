@@ -5,11 +5,20 @@ distinct investigative angles, then synthesizes a cited markdown briefing. Bread
 so the SAME engine serves a bounded per-clue pass, topic-level party discovery, and a long-form
 article — all on Dana's LM (CLIProxyAPI/MiniMax + `<think>` strip) and the Phase-A robustness.
 """
+from typing import Callable
+
 import dspy
 
+from ..db import reads, writers
 from ..llm import dspy_lm
 from .engine import GroundedResearcher
 from .retriever import DanaRetriever, ResearchBudget
+
+Emit = Callable[[dict], None]
+
+
+def _noop_emit(_ev: dict) -> None:
+    """Silent default so standalone callers (emit=None) are unaffected."""
 
 # breadth → (research angles, questions per angle, results per search)
 BREADTH = {
@@ -56,7 +65,20 @@ def deep_search(
     max_personas: int | None = None,
     max_turns: int | None = None,
     top_k: int | None = None,
+    emit: Emit | None = None,
 ) -> dict:
+    """`emit` (optional) streams SSE-style dict events (think per angle / progress) for
+    traceability; None is fully silent. Synthesized briefings are cached (24h TTL,
+    keyed by breadth+query) so re-runs are cheap."""
+    emit = emit or _noop_emit
+    # Fold breadth + any explicit budget overrides into the key so a deeper/narrower call
+    # doesn't collide with a default-breadth one.
+    cache_key = f"{breadth}:{max_personas}:{max_turns}:{top_k}:{query}"
+    cached = reads.get_cached_synthesis(topic_id, "deep_search", cache_key)
+    if cached is not None:
+        emit({"type": "think", "icon": "💾", "label": "Cached briefing", "detail": query[:80]})
+        return {**cached, "cached": True}
+
     dspy_lm.configure()
     preset = BREADTH.get(breadth, BREADTH["topic"])
     n_personas = max_personas or preset["personas"]
@@ -70,12 +92,18 @@ def deep_search(
     next_q = dspy.Predict(NextQuestion)
     synth = dspy.ChainOfThought(SynthesizeBriefing)
 
+    emit({"type": "progress", "stage": "deep_search", "pct": 0.05, "msg": f"Researching: {query[:80]}"})
     angles = (gen_angles(subject=query, n=n_personas).angles or [])[:n_personas] or [query]
+    emit({"type": "think", "icon": "🧭", "label": f"{len(angles)} research angles",
+          "detail": ", ".join(angles)[:120]})
     findings: list[tuple[str, str, list]] = []
     sources: list[dict] = []
     src_n: dict[str, int] = {}
 
-    for angle in angles:
+    for idx, angle in enumerate(angles):
+        emit({"type": "progress", "stage": "deep_search", "pct": 0.1 + 0.8 * idx / max(1, len(angles)),
+              "msg": f"Angle: {angle[:60]} ({idx + 1}/{len(angles)})"})
+        emit({"type": "think", "icon": "🔭", "label": "Research angle", "detail": angle[:100]})
         known = ""
         for _ in range(n_turns):
             if not budget.can_search():
@@ -83,6 +111,7 @@ def deep_search(
             q = next_q(subject=query, angle=angle, known=known or "nothing yet").question
             if "NO_FURTHER" in q.upper():
                 break
+            emit({"type": "think", "icon": "🔎", "label": f"{angle[:40]} asks", "detail": q[:100]})
             pred = researcher(topic=query, question=q, persona=angle)
             for i in pred.retrieved:
                 if i.url and i.url not in src_n:
@@ -97,9 +126,10 @@ def deep_search(
         parts.append(f"Q: {q}\nA: {a}\nSources: {cites or '—'}")
     src_list = "\n".join(f"[{s['n']}] {s['title']} — {s['url']}" for s in sources)
     findings_text = ("\n\n".join(parts) + "\n\nSOURCES:\n" + src_list)[:14000]
+    emit({"type": "progress", "stage": "deep_search", "pct": 0.95, "msg": "Synthesizing briefing…"})
     briefing = synth(subject=query, findings=findings_text).briefing if findings else ""
 
-    return {
+    result = {
         "status": "success", "level": "deep_search", "breadth": breadth, "query": query,
         "content": briefing,
         "sources": [{"title": s["title"], "url": s["url"]} for s in sources],
@@ -107,3 +137,7 @@ def deep_search(
         "findings_count": len(findings),
         "searches_used": budget.searches_used,
     }
+    emit({"type": "progress", "stage": "deep_search", "pct": 1.0,
+          "msg": f"Briefing complete — {len(sources)} sources, {len(findings)} findings"})
+    writers.cache_synthesis(topic_id, "deep_search", cache_key, result)
+    return result

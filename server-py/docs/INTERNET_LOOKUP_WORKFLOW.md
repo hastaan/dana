@@ -12,6 +12,47 @@ separate strip-think proxy process, the heavyweight `gpt-researcher` package, ng
 
 ---
 
+## Status
+
+- **Phase A (server-py) — DONE.**
+- **Phase A (TS backend) — DONE.** think-strip + tolerant search + source filter ported, so
+  the running app benefits from the robustness wins.
+- **Phase B — DONE.**
+- **Phase C — DONE.** `deep_search` with breadth `clue | topic | article` +
+  `/pipeline/deep-research`.
+- **Phase D — DONE.** `internet_lookup` facade + tier fallback + SSE traces +
+  synthesized-output caching. Party discovery is now grounded via `deep_search(breadth=topic)`.
+
+**Remaining / optional:**
+- localfirecrawl fetch (set `FIRECRAWL_URL`).
+- frontend UI for `/api/research/lookup`.
+- DSPy optimization (deferred — no resolved-forecast data yet).
+
+---
+
+## localfirecrawl (optional, no API key)
+
+Both backends **already** call `FIRECRAWL_URL` → `/v1/scrape` when it is set
+(`app/backend/src/tools/external/httpFetch.ts` and
+`server-py/src/dana/tools/http_fetch.py`); it sits first in the fetch chain and failures fall
+through to the existing fallbacks. No code changes are needed to use it.
+
+To enable a Playwright-grade fetch with **no API key**, run
+[localfirecrawl](https://github.com/teelaitila/localfirecrawl) separately and point Dana at it
+by setting `FIRECRAWL_URL` (e.g. `http://host.docker.internal:3002`) in `docker-compose`/`.env`.
+It is a heavy Chromium stack, so run it **on demand** rather than leaving it up.
+
+---
+
+## SearXNG note
+
+Keep the **broad** default engine set (`use_default_settings: true` + the 7 engines);
+**never** narrow it. Breadth spreads load across engines so they don't self-suspend — the app
+ran 1900+ searches with **0 empty** on the broad config. The 0-result episodes were caused by
+**narrowing** the engine list, not by rate-limits.
+
+---
+
 ## 1. Where Dana touches the web today (audit)
 
 Web access happens **only in Discovery + Enrichment**. Forum-prep / Forum / Scoring are

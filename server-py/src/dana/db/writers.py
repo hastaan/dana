@@ -3,8 +3,10 @@
 JSON columns are stored exactly as the TS backend's JSON.stringify produces them, so the
 shared schema round-trips. Sync (engine thread).
 """
+import hashlib
 import json
 import re
+import sqlite3
 import time
 from datetime import datetime, timezone
 
@@ -362,3 +364,31 @@ def corpus_store_page(topic_id: str, url: str, title: str, content: str, stage: 
             " VALUES (?,?,?,?,?,?,?)",
             (topic_id, url, title, content, len(content), ISO(), stage),
         )
+
+
+# ── Synthesis cache (re-uses research_pages via a synthetic dana:// url key) ─────
+def synthesis_url(level: str, query: str) -> str:
+    """Synthetic url key under which a synthesized output is cached in research_pages."""
+    return f"dana://{level}/" + hashlib.sha1(query.encode()).hexdigest()[:16]
+
+
+def cache_synthesis(topic_id: str, level: str, query: str, payload: dict) -> None:
+    """Persist a synthesized output (deep_lookup answer / deep_search briefing) in a dedicated
+    synthesis_cache table, so re-runs are cheap. The table has NO foreign key, so ad-hoc
+    topic_ids from the HTTP facade (e.g. 'adhoc-lookup') cache too — unlike research_pages,
+    whose FK silently rejected them. Best-effort: a failed store must never break the lookup."""
+    try:
+        content = json.dumps(payload)
+        with connect() as c:
+            c.execute(
+                "CREATE TABLE IF NOT EXISTS synthesis_cache ("
+                "key TEXT PRIMARY KEY, topic_id TEXT, level TEXT, query TEXT, "
+                "content TEXT NOT NULL, fetched_at TEXT NOT NULL)"
+            )
+            c.execute(
+                "INSERT OR REPLACE INTO synthesis_cache (key,topic_id,level,query,content,fetched_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (synthesis_url(level, query), topic_id, level, query[:200], content, ISO()),
+            )
+    except sqlite3.Error:
+        pass

@@ -8,8 +8,9 @@ All tiers run on Dana's own engine + LM chokepoint (CLIProxyAPI/MiniMax, with `<
 stripping) and the Phase-A robustness stack (tolerant search, backoff, source filter, corpus
 cache). `internet_lookup()` is the async facade with graceful tier fallback.
 """
-from typing import Literal
+from typing import Callable, Literal
 
+from ..db import reads, writers
 from ..llm import dspy_lm
 from ..rigor.sources import filter_sources
 from ..tools.web_search import web_search
@@ -17,6 +18,11 @@ from .engine import GroundedResearcher, _fmt_info
 from .retriever import DanaRetriever, ResearchBudget
 
 Level = Literal["quick", "deep_lookup", "deep_search"]
+Emit = Callable[[dict], None]
+
+
+def _noop_emit(_ev: dict) -> None:
+    """Silent default so standalone callers (emit=None) are unaffected."""
 
 
 # ── quick ───────────────────────────────────────────────────────────────────────
@@ -40,16 +46,33 @@ def deep_lookup(
     fetch_top: int = 2,
     max_sub_questions: int = 3,
     persona: str = "",
+    emit: Emit | None = None,
 ) -> dict:
     """Search → scrape top-K → synthesize a grounded, cited answer to one question.
-    This is the `GroundedResearcher` pattern exposed as a reusable tier."""
+    This is the `GroundedResearcher` pattern exposed as a reusable tier.
+
+    `emit` (optional) streams SSE-style dict events (think / progress) for traceability;
+    None is fully silent. Synthesized answers are cached (24h TTL) so re-runs are cheap."""
+    emit = emit or _noop_emit
+    # Cache key folds in the params that change the answer's shape, so a persona-scoped or
+    # deeper lookup doesn't return a neutral/shallow cached one.
+    ckey = f"{persona}|{top_k}|{fetch_top}|{max_sub_questions}|{query}"
+    cached = reads.get_cached_synthesis(topic_id, "deep_lookup", ckey)
+    if cached is not None:
+        emit({"type": "think", "icon": "💾", "label": "Cached lookup", "detail": query[:80]})
+        return {**cached, "cached": True}
+
     dspy_lm.configure()
+    emit({"type": "progress", "stage": "deep_lookup", "pct": 0.1, "msg": f"Looking up: {query[:80]}"})
     budget = ResearchBudget(max_searches=top_k + 2)
     retriever = DanaRetriever(topic_id, budget, top_k=top_k, fetch_top=fetch_top)
     researcher = GroundedResearcher(retriever, max_queries=max_sub_questions)
+    emit({"type": "think", "icon": "🔎", "label": "Deep lookup", "detail": query[:100]})
     pred = researcher(topic=topic or query, question=query, persona=persona)
+    for sub in getattr(pred, "queries", []) or []:
+        emit({"type": "think", "icon": "❓", "label": "Sub-question", "detail": str(sub)[:100]})
     sources = [{"title": i.title, "url": i.url} for i in pred.retrieved]
-    return {
+    result = {
         "status": "success", "level": "deep_lookup", "query": query,
         "answer": pred.answer,
         "context": _fmt_info(pred.retrieved),
@@ -58,6 +81,10 @@ def deep_lookup(
         "source_count": len(sources),
         "searches_used": budget.searches_used,
     }
+    emit({"type": "progress", "stage": "deep_lookup", "pct": 1.0,
+          "msg": f"Lookup complete — {len(sources)} sources"})
+    writers.cache_synthesis(topic_id, "deep_lookup", ckey, result)
+    return result
 
 
 # ── async facade with graceful tier fallback ─────────────────────────────────────
@@ -77,14 +104,14 @@ async def internet_lookup(query: str, *, level: Level = "deep_lookup", **params)
                 return await asyncio.to_thread(
                     lambda: deep_lookup(query, **{k: v for k, v in params.items()
                                                   if k in {"topic", "topic_id", "top_k", "fetch_top",
-                                                           "max_sub_questions", "persona"}})
+                                                           "max_sub_questions", "persona", "emit"}})
                 )
             if lvl == "deep_search":
                 from .deep_search import deep_search  # lazy: heavier engine
                 res = await asyncio.to_thread(
                     lambda: deep_search(query, **{k: v for k, v in params.items()
                                                   if k in {"topic_id", "breadth", "max_personas",
-                                                           "max_turns", "top_k"}})
+                                                           "max_turns", "top_k", "emit"}})
                 )
                 if start > 0:  # caller asked for a lower tier but we entered the loop here
                     return res

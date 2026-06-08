@@ -80,27 +80,30 @@ class StormResearchEngine:
     # ── Phase 0: ground party-finding in real web evidence (workflow: discovery → deep research) ──
     def _ground_topic(self, topic: str, emit: Emit) -> str:
         """A bounded grounded pass BEFORE seeding so parties are discovered from real reporting,
-        not LLM priors. Uses the same grounded researcher (deep_lookup primitive); shares the
-        search budget; degrades to '' when search is unavailable (then seeding proceeds as before)."""
+        not LLM priors. Runs a topic-breadth `deep_search` but EXPLICITLY BOUNDED (2 personas ×
+        2 turns) so it adds only ~12 searches, not the full topic-breadth budget — discovery
+        already has its own ~24-search budget, and over-querying is what self-suspends SearXNG
+        engines. The grounding uses its own (bounded) budget, separate from self.budget. Tune
+        with DANA_GROUND_PERSONAS / DANA_GROUND_TURNS; disable with DANA_GROUND_DISCOVERY=0.
+        Degrades to '' when search is unavailable. `deep_search` imports this module, so import
+        it LAZILY to avoid a circular import at module load."""
         if os.getenv("DANA_GROUND_DISCOVERY", "1") == "0":
             return ""
-        questions = [
-            f"Who are the key parties, actors, states, and organizations involved in: {topic}?",
-            f"What are the most important recent developments, events, and facts about: {topic}?",
-        ]
-        bits: list[str] = []
-        for q in questions:
-            if not self.budget.can_search():
-                break
-            try:
-                r = self.researcher(topic=topic, question=q, persona="situation analyst")
-            except Exception:  # noqa: BLE001
-                continue
-            if r.answer and "INSUFFICIENT_EVIDENCE" not in r.answer:
-                bits.append(f"- {r.answer[:600]}")
-                emit({"type": "think", "icon": "🌐", "label": "Grounding discovery", "detail": q[:80]})
+        gp = int(os.getenv("DANA_GROUND_PERSONAS", "2"))
+        gt = int(os.getenv("DANA_GROUND_TURNS", "2"))
+        try:
+            from .deep_search import deep_search  # lazy: deep_search imports engine
+            res = deep_search(topic, breadth="topic", topic_id=self.topic_id, emit=emit,
+                              max_personas=gp, max_turns=gt, top_k=self.cfg.top_k)
+        except Exception:  # noqa: BLE001
+            return ""
+        briefing = (res.get("content") or "").strip() if isinstance(res, dict) else ""
+        if not briefing:
+            return ""
+        emit({"type": "think", "icon": "🌐", "label": "Grounding discovery",
+              "detail": f"{len(res.get('sources', []))} sources"})
         return ("Researched real-world context (use these facts to identify the actual parties):\n"
-                + "\n".join(bits)) if bits else ""
+                + briefing)
 
     # ── Phase 1: perspective seeding ──
     def _seed_personas(self, topic: str, description: str, emit: Emit):
