@@ -1,4 +1,21 @@
-use_default_settings: true
+# SearXNG config for Dana's JSON-API use.
+#
+# Evidence-based engine set: from a server/datacenter IP, google + bing return results cleanly
+# (they never error), while duckduckgo/qwant/brave/startpage/mojeek + the default aol/karmasearch/
+# wikidata/onion engines only CAPTCHA / 403 / disconnect and FLOOD the logs while contributing
+# nothing. So we keep ONLY the engines that actually work and force-enable them. This is not the
+# "narrowing" that broke results before (that failure was keep_only NOT enabling default-disabled
+# engines like bing) — here we keep_only AND explicitly enable, and google+bing were already doing
+# all the real work. Net: same results, quiet logs.
+#
+# keep_only restricts the (large) default engine set to this whitelist; the engines: block then
+# force-enables them (bing/wikipedia ship disabled-by-default, so this is required).
+use_default_settings:
+  engines:
+    keep_only:
+      - google
+      - bing
+      - wikipedia
 
 search:
   formats:
@@ -15,27 +32,11 @@ engines:
     engine: google
     disabled: false
     shortcut: g
-  - name: duckduckgo
-    engine: duckduckgo
-    disabled: false
-    shortcut: ddg
-  - name: brave
-    engine: brave
-    disabled: false
-    shortcut: br
-  - name: qwant
-    engine: qwant
-    disabled: false
-    shortcut: qw
   - name: bing
     engine: bing
     disabled: false
     shortcut: bi
-  - name: startpage
-    engine: startpage
+  - name: wikipedia
+    engine: wikipedia
     disabled: false
-    shortcut: sp
-  - name: mojeek
-    engine: mojeek
-    disabled: false
-    shortcut: mj
+    shortcut: wp
