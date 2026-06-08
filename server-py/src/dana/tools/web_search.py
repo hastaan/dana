@@ -1,28 +1,46 @@
 """Web search (⇄ TS tools/external/webSearch.ts): SearXNG JSON API, Brave HTML fallback.
 
 Sync (called from DSPy modules running in a worker thread).
+
+Robustness (Phase A): SearXNG is the primary path and is **failure-tolerant** — its per-engine
+CAPTCHA/403 noise (DuckDuckGo etc.) still leaves results from the engines that answered, so an
+empty/partial result is a VALID answer, not a failure. We retry SearXNG with backoff on real
+transport/5xx errors, and only fall back to the Brave HTML scrape as a genuine last resort
+(it rate-limits/429s hard, which is what caused the old cascade). On total failure we return
+`[]` and let the caller (the grounded researcher) emit INSUFFICIENT_EVIDENCE — one bad search
+never aborts a run.
 """
+import logging
 import re
+import time
 
 import httpx
 
 from ..config import settings
 
+logger = logging.getLogger("dana.web_search")
 _UA = "Mozilla/5.0 (compatible; Dana/1.0; +https://dana.local)"
+_BACKOFF = (1.0, 3.0)  # SearXNG transient-error retries
 
 
 def web_search(query: str, num_results: int = 5, language: str | None = None) -> list[dict]:
     clean = re.sub(r"site:\S+", "", query, flags=re.I)
     clean = re.sub(r"\s{2,}", " ", clean).strip()
-    try:
-        return _searxng(clean or query, num_results, language)
-    except Exception as searx_err:  # noqa: BLE001
+    q = clean or query
+    last_err: Exception | None = None
+    for attempt in range(len(_BACKOFF) + 1):
         try:
-            return _brave(query, num_results)
-        except Exception as brave_err:  # noqa: BLE001
-            raise RuntimeError(
-                f"web_search failed: SearXNG: {searx_err}; Brave: {brave_err}"
-            ) from brave_err
+            return _searxng(q, num_results, language)  # 200 → results (possibly empty) is success
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < len(_BACKOFF):
+                time.sleep(_BACKOFF[attempt])
+    logger.warning("SearXNG failed after retries (%s); trying Brave once", last_err)
+    try:
+        return _brave(query, num_results)
+    except Exception as brave_err:  # noqa: BLE001
+        logger.warning("web_search degraded to empty (SearXNG: %s; Brave: %s)", last_err, brave_err)
+        return []  # tolerant: empty result, never abort the research run
 
 
 def _searxng(query: str, num_results: int, language: str | None) -> list[dict]:

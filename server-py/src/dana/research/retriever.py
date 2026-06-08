@@ -6,6 +6,7 @@ check research_searches first, fall back to live SearXNG, store the result.
 from dataclasses import dataclass, field
 
 from ..db import writers
+from ..rigor.sources import is_valid_source
 from ..tools.http_fetch import http_fetch
 from ..tools.web_search import web_search
 
@@ -76,8 +77,8 @@ class DanaRetriever:
                     results = []
             for r in results[: self.top_k]:
                 url = r.get("url", "")
-                if not url or url in seen:
-                    continue
+                if not url or url in seen or not is_valid_source(url):
+                    continue  # skip dupes + known fabrication/spam domains
                 seen.add(url)
                 out.append(
                     Information(
