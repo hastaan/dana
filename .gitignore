@@ -10,4 +10,5 @@ app/frontend/dist/
 *.log
 .pids
 /.factory
+/.claude
 /docs

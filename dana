@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# dana — control CLI for the Dana app.
+#
+# A thin wrapper over `docker compose` so you can run `dana start|stop|restart|status|
+# logs|update|install` from anywhere. The containers themselves are booted by
+# entrypoint.sh (the image CMD); this script just drives their lifecycle from the host.
+set -euo pipefail
+
+# Resolve the repo directory even when `dana` is invoked through a symlink on PATH.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DANA_DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
+
+PORT="${PORT:-3000}"
+
+dc() { (cd "$DANA_DIR" && docker compose "$@"); }
+
+usage() {
+  cat <<EOF
+dana — control the Dana app  (http://localhost:$PORT)
+
+Usage: dana <command> [args]
+
+Lifecycle (Docker):
+  install        Build the image(s)                     (docker compose build)
+  start          Start app + web search in background   (docker compose up -d)
+  stop           Stop and remove containers             (docker compose down)
+  restart        Restart running services               (docker compose restart)
+  update         git pull, rebuild, restart
+  status         Show service status                    (docker compose ps)
+  logs [svc]     Follow logs (optionally one service)   (docker compose logs -f)
+  shell          Open a shell inside the app container
+
+Local development (needs Bun + a proxy on :8317):
+  dev            Run backend (:$PORT) + frontend dev server (:5173)
+
+Setup:
+  link           Symlink \`dana\` onto your PATH (run it from anywhere)
+  help           Show this help
+EOF
+}
+
+dev() {
+  command -v bun >/dev/null 2>&1 || { echo "bun is not installed — see https://bun.sh" >&2; exit 1; }
+  echo "Bringing up SearXNG (web search) via compose…"
+  dc up -d searxng >/dev/null 2>&1 || echo "  (skipped — start SearXNG yourself if search fails)"
+  echo "Starting backend (:$PORT) + frontend dev server (:5173). Needs CLIProxyAPI on :8317."
+  ( cd "$DANA_DIR/app/backend" && bun install >/dev/null 2>&1 && PORT="$PORT" bun run --watch src/index.ts ) &
+  local back=$!
+  ( cd "$DANA_DIR/app/frontend" && bun install >/dev/null 2>&1 && bun run dev ) &
+  local front=$!
+  trap 'kill "$back" "$front" 2>/dev/null || true' INT TERM
+  wait
+}
+
+link() {
+  local target="$DANA_DIR/dana" d
+  for d in "$HOME/.local/bin" /usr/local/bin; do
+    if [ -d "$d" ] && case ":$PATH:" in *":$d:"*) true ;; *) false ;; esac; then
+      if ln -sf "$target" "$d/dana" 2>/dev/null; then echo "Linked → $d/dana"; return; fi
+    fi
+  done
+  mkdir -p "$HOME/.local/bin" && ln -sf "$target" "$HOME/.local/bin/dana"
+  echo "Linked → $HOME/.local/bin/dana"
+  echo "Add it to PATH if needed:  export PATH=\"\$HOME/.local/bin:\$PATH\""
+}
+
+cmd="${1:-help}"; shift 2>/dev/null || true
+case "$cmd" in
+  install|build)  dc build "$@" ;;
+  start|up)       dc up -d "$@"; echo "Dana → http://localhost:$PORT   (\`dana status\` to check · \`dana logs\` to watch)" ;;
+  stop|down)      dc down "$@" ;;
+  restart)        dc restart "$@"; echo "Restarted → http://localhost:$PORT" ;;
+  status|ps)      dc ps "$@" ;;
+  logs)           dc logs -f "$@" ;;
+  shell|sh)       dc exec dana sh ;;
+  update)         ( cd "$DANA_DIR" && git pull --ff-only ) && dc build && dc up -d && echo "Updated → http://localhost:$PORT" ;;
+  dev)            dev ;;
+  link)           link ;;
+  help|-h|--help) usage ;;
+  *)              echo "dana: unknown command '$cmd'" >&2; echo; usage; exit 1 ;;
+esac
