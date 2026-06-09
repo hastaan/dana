@@ -46,6 +46,32 @@ firecrawl() {
   echo "Dana uses it automatically via FIRECRAWL_URL=http://host.docker.internal:3002."
 }
 
+# Opt-in cutover: run the Python (FastAPI/DSPy) backend AS the served app on :3001,
+# serving the built React SPA itself (FRONTEND_DIST). Gated behind the compose
+# `pyserve` profile so the default stack is untouched. See server-py/docs/CUTOVER.md.
+PYSERVE_PORT="${PYSERVE_PORT:-3001}"
+
+pyserve() {
+  local dist="$DANA_DIR/app/frontend/dist"
+  # The compose service bind-mounts app/frontend/dist read-only into the container.
+  # Build the SPA if it's missing so server-py has something to serve.
+  if [ ! -f "$dist/index.html" ]; then
+    command -v bun >/dev/null 2>&1 || {
+      echo "app/frontend/dist is missing and bun is not installed to build it." >&2
+      echo "Install bun (https://bun.sh) or build the SPA yourself into $dist." >&2
+      exit 1
+    }
+    echo "Building the SPA into app/frontend/dist (one-time; needed for pyserve)…"
+    ( cd "$DANA_DIR/app/frontend" && bun install >/dev/null 2>&1 && bun run build )
+  else
+    echo "Using existing built SPA at app/frontend/dist."
+  fi
+  echo "Building + starting the Python backend (server-py) on :$PYSERVE_PORT (serving the SPA)…"
+  dc --profile pyserve up -d --build server-py "$@"
+  echo "server-py → http://localhost:$PYSERVE_PORT   (\`dana logs server-py\` to watch · \`dana pyserve-stop\` to stop)"
+  echo "It serves the React SPA via FRONTEND_DIST and the /api + /stream contract from Python."
+}
+
 usage() {
   cat <<EOF
 dana — control the Dana app  (http://localhost:$PORT)
@@ -61,6 +87,10 @@ Lifecycle (Docker):
   status         Show service status                    (docker compose ps)
   logs [svc]     Follow logs (optionally one service)   (docker compose logs -f)
   shell          Open a shell inside the app container
+
+Python backend AS the served app (opt-in cutover — see server-py/docs/CUTOVER.md):
+  pyserve        Build the SPA (if missing) + run server-py serving it on :3001
+  pyserve-stop   Stop the server-py service (leaves the rest of the stack up)
 
 Playwright-grade fetch (opt-in, no API key — HEAVY build-from-source):
   firecrawl      Clone+build+start localfirecrawl (Firecrawl api on :3002)
@@ -135,6 +165,8 @@ case "$cmd" in
   status|ps)      dc ps "$@" ;;
   logs)           dc logs -f "$@" ;;
   shell|sh)       dc exec dana sh ;;
+  pyserve)           pyserve "$@" ;;
+  pyserve-stop)      dc --profile pyserve stop server-py "$@" ;;
   firecrawl)         firecrawl "$@" ;;
   firecrawl-stop)    fc down "$@" ;;
   firecrawl-logs)    fc logs -f "$@" ;;

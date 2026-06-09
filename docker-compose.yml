@@ -41,6 +41,51 @@ services:
     networks:
       - dana-net
 
+  # ── Opt-in: run the Python (FastAPI/DSPy) backend AS the served app ──────────
+  # The cutover candidate (see server-py/docs/CUTOVER.md). Gated behind the
+  # `pyserve` profile so a plain `docker compose up` is UNCHANGED — this service
+  # only starts with `docker compose --profile pyserve up` (or `dana pyserve`).
+  # It serves on :3001 and, when FRONTEND_DIST points at a built SPA, serves the
+  # React app itself (main.py mounts the static SPA LAST so /api/* still wins),
+  # so the whole app runs on the Python backend with no TS container.
+  server-py:
+    profiles: ["pyserve"]
+    build:
+      context: ./server-py
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3001
+      DATA_DIR: /data
+      # CLIProxyAPI: reuse the root `dana` container's proxy on the shared net by
+      # default; override PROXY_BASE_URL in .env to point elsewhere (e.g. host).
+      PROXY_BASE_URL: ${PROXY_BASE_URL:-http://dana:8317}
+      SEARXNG_URL: http://searxng:8080
+      MANAGEMENT_SECRET: ${MANAGEMENT_SECRET:-}
+      FIRECRAWL_URL: ${FIRECRAWL_URL:-http://host.docker.internal:3002}
+      # Serve the built React SPA from this process. `dana pyserve` builds the SPA
+      # into app/frontend/dist and mounts it at /app/frontend-dist (below), so the
+      # default points there; override to relocate.
+      FRONTEND_DIST: ${FRONTEND_DIST:-/app/frontend-dist}
+    ports:
+      - "3001:3001"
+    volumes:
+      # A COPY of the DB, never the live shared ./data while the TS backend runs
+      # (SQLite is single-writer — see CUTOVER.md "Shared dana.db" risk).
+      - ./server-py/data:/data
+      # The built SPA, read-only, so server-py can serve it via FRONTEND_DIST.
+      - ./app/frontend/dist:/app/frontend-dist:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      searxng:
+        condition: service_started
+      # The `dana` container hosts CLIProxyAPI (server-py reaches it at dana:8317 above).
+      dana:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - dana-net
+
 networks:
   dana-net:
     driver: bridge

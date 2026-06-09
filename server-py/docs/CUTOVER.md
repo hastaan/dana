@@ -148,3 +148,66 @@ Each phase is independently reversible; nothing above is destructive if the DB b
 5. **Recommendation: NOT yet ready to flip.** First close the prompts gap (or hide it), then make
    parity *real* via green golden/contract tests on every endpoint + the SSE byte-stream before
    touching the live DB.
+
+---
+
+## 7. How to run the dev flip + pyserve
+
+Two practical mechanics for Phase B/C above: a **contract-diff probe** to prove parity, a
+**dev proxy flip** to point the frontend at Python, and **`dana pyserve`** to run the Python
+backend *as the whole served app* (Python serves the SPA too — no TS container).
+
+### 7.1 Contract-diff probe (`server-py/tests/contract_diff.py`)
+
+A read-only, stdlib-only harness that hits the SAME GET endpoints on TS (`:3000`) and
+server-py (`:3001`) and prints a per-endpoint **PASS / DIFF / UNREACHABLE** report: status-code
+match plus a recursive JSON *shape* (key-set + leaf-type) diff with volatile fields (timestamps,
+ids, versions, durations, …) ignored. It compares response **structure, not values** — it is a
+parity probe, not a golden test. It never runs the pipeline, never calls an LLM/web-search, and
+**does not require both servers up** (a down server is reported `unreachable`, never crashes).
+
+```bash
+# both backends up (e.g. TS via `dana start`, Python via server-py/docker-compose.yml):
+python server-py/tests/contract_diff.py <TOPIC_ID>
+
+# override ports / send an auth token if the backends are gated:
+BASE_TS=http://localhost:3000 BASE_PY=http://localhost:3001 \
+  DANA_API_TOKEN=… python server-py/tests/contract_diff.py <TOPIC_ID>
+```
+
+Endpoints probed: `/api/topics`, `/api/topics/:id`, `…/parties`, `…/clues`, `…/verdict`,
+`…/expert-council`, `…/representatives`, `…/forum`, `/api/calibration`, `/api/settings`,
+`/api/providers/custom`, `/api/prompts`, `/api/prompts/tool-catalog`, `/api/health`. Exit code is
+`1` if any reachable pair DIFFs, else `0`. Expect `/api/prompts*` to DIFF until that router is
+ported (the known gap in §2) — both should otherwise PASS once parity holds.
+
+### 7.2 Dev flip (frontend → Python), unchanged from Phase B
+
+In `app/frontend/vite.config.ts`, change the dev proxy target `'/api': 'http://localhost:3000'`
+→ `'http://localhost:3001'`, restart Vite, exercise every screen. One-line revert to roll back.
+
+### 7.3 `dana pyserve` — Python backend serving the whole app
+
+The root `docker-compose.yml` carries an **opt-in** `server-py` service behind a compose
+`pyserve` profile, so a plain `docker compose up` / `dana start` is **unchanged** (the service is
+absent unless the profile is active). When active it builds `./server-py`, serves on `:3001`, and
+— via `FRONTEND_DIST` (bind-mounted from `app/frontend/dist`) — serves the built React SPA itself
+(`main.py` mounts the SPA LAST so `/api/*` still wins). The result: the whole app runs on the
+Python backend, no TS container needed.
+
+```bash
+# build the SPA into app/frontend/dist if missing, then build+start server-py:
+dana pyserve            # → http://localhost:3001  (SPA + /api + /stream, all Python)
+dana logs server-py     # watch it
+dana pyserve-stop       # stop just the Python service; rest of the stack stays up
+
+# equivalent raw compose (no SPA auto-build):
+docker compose --profile pyserve up -d --build server-py
+docker compose --profile pyserve stop server-py
+```
+
+Notes: `dana pyserve` requires `bun` only the first time (to build the SPA); thereafter it reuses
+the existing `app/frontend/dist`. The service mounts a **COPY** of the DB (`./server-py/data`),
+never the live shared `./data`, while the TS backend runs — honoring the SQLite single-writer risk
+in §3. `PROXY_BASE_URL` defaults to the root `dana` container's proxy (`http://dana:8317`) on the
+shared compose network; override it in `.env` to point elsewhere.
