@@ -13,7 +13,7 @@ from typing import Callable, Literal
 from ..db import reads, writers
 from ..llm import dspy_lm
 from ..rigor.sources import filter_sources
-from ..tools.web_search import web_search
+from ..tools.web_search import distill_query, web_search
 from .engine import GroundedResearcher, _fmt_info
 from .retriever import DanaRetriever, ResearchBudget
 
@@ -27,8 +27,20 @@ def _noop_emit(_ev: dict) -> None:
 
 # ── quick ───────────────────────────────────────────────────────────────────────
 def quick(query: str, top_k: int = 8, language: str | None = None) -> dict:
-    """One SearXNG pass → source-filtered ranked hits. No LLM."""
-    hits = filter_sources(web_search(query, num_results=top_k, language=language))
+    """SearXNG → source-filtered ranked hits. No LLM.
+
+    Robustness: a single verbose query makes flaky scrapers return off-topic fallback junk
+    (which the relevance floor then drops to nothing). So for a long query we ALSO fire a tight
+    keyword-distilled variant and merge — a cheap, no-LLM echo of the sub-question decomposition
+    gpt-researcher/STORM use. The raw pass keeps full-phrase precision; the distilled pass gives
+    a second shot when the verbose form trips the scraper."""
+    results = web_search(query, num_results=top_k, language=language)
+    distilled = distill_query(query)
+    if distilled and distilled.lower() != query.strip().lower() and len(distilled.split()) < len(query.split()):
+        seen = {r["url"] for r in results}
+        results += [r for r in web_search(distilled, num_results=top_k, language=language)
+                    if r["url"] not in seen]
+    hits = filter_sources(results)
     return {
         "status": "success", "level": "quick", "query": query,
         "results": hits, "sources": [{"title": h["title"], "url": h["url"]} for h in hits],

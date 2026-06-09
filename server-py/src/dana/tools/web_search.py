@@ -28,7 +28,7 @@ _STOPWORDS: frozenset[str] = frozenset({
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "are",
     "was", "were", "be", "by", "at", "as", "it", "its", "with", "from", "that",
     "this", "what", "who", "when", "where", "why", "how", "did", "do", "does",
-    "vs", "versus", "about", "into", "over", "after", "before",
+    "vs", "versus", "about", "into", "over", "after", "before", "new",
 })
 # Wikipedia language-subdomain pattern, e.g. "sv.wikipedia.org", "de.m.wikipedia.org".
 _WIKI_LANG_RE = re.compile(r"^([a-z]{2,3})\.(?:m\.)?wikipedia\.org$", re.I)
@@ -38,6 +38,28 @@ _WORD_RE = re.compile(r"[a-z0-9]+", re.I)
 def _terms(text: str) -> set[str]:
     """Lowercased, stopword-stripped, ≥3-char content tokens of a string."""
     return {t for t in _WORD_RE.findall(text.lower()) if len(t) >= 3 and t not in _STOPWORDS}
+
+
+def distill_query(query: str, max_terms: int = 6) -> str:
+    """Order-preserving keyword distillation of a verbose query (NO LLM, NO network).
+
+    A long natural-language query ("Islamic Republic regime collapse and formation of a new
+    Iranian state") makes flaky scrapers (bing's anti-bot fallback) return off-topic junk,
+    while a tight keyword query of the same topic returns real hits. This drops stopwords +
+    short tokens, dedupes, and keeps the first `max_terms` content words — so callers can fire
+    a cheap second search shot. Returns "" if nothing meaningful distills. (Mirrors the
+    sub-question decomposition that gpt-researcher/STORM rely on, minus the LLM.)
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for tok in _WORD_RE.findall(query):
+        low = tok.lower()
+        if len(low) >= 3 and low not in _STOPWORDS and low not in seen:
+            seen.add(low)
+            out.append(tok)
+            if len(out) >= max_terms:
+                break
+    return " ".join(out)
 
 
 def _host(url: str) -> str:
