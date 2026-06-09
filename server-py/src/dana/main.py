@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .api import calibration as calibration_api
+from .api import clues as clues_api
 from .api import internet as internet_api
 from .api.auth import ApiTokenMiddleware
 from .api import models as models_api
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(topics_api.router)
+    app.include_router(clues_api.router)
     app.include_router(stream_api.router)
     app.include_router(models_api.router)
     app.include_router(pipeline_api.router)

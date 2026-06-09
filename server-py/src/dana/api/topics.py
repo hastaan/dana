@@ -385,16 +385,9 @@ async def split_party(topic_id: str, body: SplitBody):
     return {"removed": body.source_id, "created": created}
 
 
-@router.get("/api/topics/{topic_id}/clues")
-async def get_clues(topic_id: str):
-    return await reads.list_clues_api(topic_id)
-
-
-@router.delete("/api/topics/{topic_id}/clues/{clue_id}")
-async def delete_clue(topic_id: str, clue_id: str):
-    """Delete one clue and its versions (CluesPanel card delete)."""
-    await asyncio.to_thread(writers.delete_clue, topic_id, clue_id)
-    return {"success": True}
+# NOTE: the clue routes (GET list / GET one / POST add / PUT edit / DELETE / smart-edit / research /
+# bulk / update-all / cleanup) live in api/clues.py, which supersedes the two stubs that used to be
+# here (adding ?version handling on GET and the missing markStale on DELETE).
 
 
 # ── Verdict / expert council (⇄ TS expertCouncil.ts) ───────────────────────────

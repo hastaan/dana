@@ -264,6 +264,168 @@ def count_clues(topic_id: str) -> int:
         return c.execute("SELECT COUNT(*) FROM clues WHERE topic_id=?", (topic_id,)).fetchone()[0]
 
 
+# ── Clue management (⇄ deleted TS db/queries/clues.ts) — sync, callable from worker threads ──
+def _version_dict(v) -> dict:
+    """Build one full version object from a clue_versions row — the SAME 14-field mapping
+    reads.list_clues_api uses, so get_clue round-trips byte-identically (json.loads on the
+    json cols). `v` is a sqlite3.Row (mapping access)."""
+    return {
+        "v": v["version"], "title": v["title"], "date": v["date"],
+        "timeline_date": v["timeline_date"], "clue_type": v["clue_type"],
+        "relevance_score": v["relevance_score"],
+        "party_relevance": json.loads(v["party_relevance"] or "[]"),
+        "domain_tags": json.loads(v["domain_tags"] or "[]"),
+        "bias_corrected_summary": v["bias_corrected_summary"], "change_note": v["change_note"],
+        "key_points": json.loads(v["key_points"] or "[]"),
+        "fact_check": json.loads(v["fact_check"] or "{}"),
+        "raw_source": json.loads(v["raw_source"] or "{}"),
+        "source_credibility": json.loads(v["source_credibility"] or "{}"),
+    }
+
+
+def get_clue(topic_id: str, clue_id: str) -> dict | None:
+    """Sync single-clue read shaped EXACTLY like one element of reads.list_clues_api (⇄ dbGetClue):
+    {id, status, added_by, added_at, last_updated_at, current: <version#>, versions: [<full version
+    objects>]}. Callable from a worker thread (PUT/smart-edit/research/cleanup need it). None when
+    the clue is absent."""
+    with connect() as c:
+        row = c.execute(
+            "SELECT id,status,added_by,added_at,last_updated_at,current_version FROM clues "
+            "WHERE id=? AND topic_id=?", (clue_id, topic_id),
+        ).fetchone()
+        if row is None:
+            return None
+        vrows = c.execute(
+            "SELECT * FROM clue_versions WHERE clue_id=? AND topic_id=? ORDER BY version",
+            (clue_id, topic_id),
+        ).fetchall()
+    return {
+        "id": row["id"], "status": row["status"], "added_by": row["added_by"],
+        "added_at": row["added_at"], "last_updated_at": row["last_updated_at"],
+        "current": row["current_version"], "versions": [_version_dict(v) for v in vrows],
+    }
+
+
+def update_clue_version(topic_id: str, clue_id: str, patch: dict) -> None:
+    """Patch the CURRENT version's fields in place (⇄ dbUpdateClueVersion). patch keys use version
+    field names (title, bias_corrected_summary, relevance_score, party_relevance, domain_tags,
+    timeline_date, clue_type, change_note, key_points, source_credibility, fact_check). No-op when
+    the clue / its current version is absent."""
+    clue = get_clue(topic_id, clue_id)
+    if clue is None:
+        return
+    cur = next((v for v in clue["versions"] if v["v"] == clue["current"]), None)
+    if cur is None:
+        return
+    m = {**cur, **patch}
+    with connect() as c:
+        c.execute(
+            "UPDATE clue_versions SET title=?, bias_corrected_summary=?, relevance_score=?, "
+            "party_relevance=?, domain_tags=?, timeline_date=?, clue_type=?, change_note=?, "
+            "key_points=?, source_credibility=?, fact_check=? "
+            "WHERE clue_id=? AND topic_id=? AND version=?",
+            (
+                m["title"], m["bias_corrected_summary"], m["relevance_score"],
+                json.dumps(m.get("party_relevance", [])), json.dumps(m.get("domain_tags", [])),
+                m["timeline_date"], m["clue_type"], m["change_note"],
+                json.dumps(m.get("key_points", [])), json.dumps(m.get("source_credibility", {})),
+                json.dumps(m.get("fact_check", {})), clue_id, topic_id, clue["current"],
+            ),
+        )
+        c.execute("UPDATE clues SET last_updated_at=? WHERE id=? AND topic_id=?",
+                  (ISO(), clue_id, topic_id))
+
+
+def add_clue_version(topic_id: str, clue_id: str, version: dict) -> None:
+    """Append a new version + bump the clue's current_version (⇄ dbAddClueVersion). Status flips
+    to 'pending' (the new version awaits a fact-check verdict). ONE transaction."""
+    with connect() as c:
+        c.execute(
+            "INSERT INTO clue_versions (clue_id,topic_id,version,date,title,raw_source,"
+            "source_credibility,bias_corrected_summary,relevance_score,party_relevance,domain_tags,"
+            "timeline_date,clue_type,change_note,key_points,fact_check) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                clue_id, topic_id, version["v"], version.get("date", ISO()), version.get("title", ""),
+                json.dumps(version.get("raw_source", {})),
+                json.dumps(version.get("source_credibility", {})),
+                version.get("bias_corrected_summary", ""), version.get("relevance_score", 50),
+                json.dumps(version.get("party_relevance", [])), json.dumps(version.get("domain_tags", [])),
+                version.get("timeline_date", ISO()[:10]), version.get("clue_type", "event"),
+                version.get("change_note", ""), json.dumps(version.get("key_points", [])),
+                json.dumps(version.get("fact_check", {})),
+            ),
+        )
+        c.execute("UPDATE clues SET current_version=?, last_updated_at=?, status='pending' "
+                  "WHERE id=? AND topic_id=?", (version["v"], ISO(), clue_id, topic_id))
+
+
+def next_clue_id(topic_id: str) -> str:
+    """Zero-padded sequential id (⇄ dbNextClueId): clue-001, clue-002, … (distinct from add_clue's
+    clue-<hex>-<slug>). Manual-add / research / merged-cleanup ids use this scheme."""
+    return f"clue-{count_clues(topic_id) + 1:03d}"
+
+
+def replace_clues(topic_id: str, clues: list[dict]) -> None:
+    """Wipe and re-insert every clue + version for a topic (⇄ dbReplaceClues; cleanup/apply
+    renumber+replace). Each clue dict is the nested {id,current,status,added_by,added_at,
+    last_updated_at,versions:[full version objs]} shape. ONE transaction; wipes clue_versions too
+    (PK is (clue_id,topic_id,version), no cascade)."""
+    with connect() as c:
+        c.execute("DELETE FROM clue_versions WHERE topic_id=?", (topic_id,))
+        c.execute("DELETE FROM clues WHERE topic_id=?", (topic_id,))
+        for clue in clues:
+            c.execute(
+                "INSERT INTO clues (id,topic_id,current_version,status,added_by,added_at,last_updated_at)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (clue["id"], topic_id, clue.get("current", 1), clue.get("status", "pending"),
+                 clue.get("added_by", "auto"), clue.get("added_at", ISO()),
+                 clue.get("last_updated_at", ISO())),
+            )
+            for v in clue.get("versions", []):
+                c.execute(
+                    "INSERT INTO clue_versions (clue_id,topic_id,version,date,title,raw_source,"
+                    "source_credibility,bias_corrected_summary,relevance_score,party_relevance,"
+                    "domain_tags,timeline_date,clue_type,change_note,key_points,fact_check) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        clue["id"], topic_id, v["v"], v.get("date", ISO()), v.get("title", ""),
+                        json.dumps(v.get("raw_source", {})),
+                        json.dumps(v.get("source_credibility", {})),
+                        v.get("bias_corrected_summary", ""), v.get("relevance_score", 50),
+                        json.dumps(v.get("party_relevance", [])), json.dumps(v.get("domain_tags", [])),
+                        v.get("timeline_date", ISO()[:10]), v.get("clue_type", "event"),
+                        v.get("change_note", ""), json.dumps(v.get("key_points", [])),
+                        json.dumps(v.get("fact_check", {})),
+                    ),
+                )
+
+
+def set_clue_status(topic_id: str, clue_id: str, status: str) -> None:
+    """Set a clue's status (fact-check verdict → status). Bumps last_updated_at."""
+    with connect() as c:
+        c.execute("UPDATE clues SET status=?, last_updated_at=? WHERE id=? AND topic_id=?",
+                  (status, ISO(), clue_id, topic_id))
+
+
+def clue_index(topic_id: str) -> list[dict]:
+    """Compact current-version index for bulk-import dedupe context (⇄ dbGetClueIndex):
+    [{id, title, timeline_date, party_relevance, relevance_score}], ordered by id."""
+    with connect() as c:
+        rows = c.execute(
+            "SELECT c.id AS id, cv.title AS title, cv.timeline_date AS timeline_date, "
+            "cv.party_relevance AS party_relevance, cv.relevance_score AS relevance_score "
+            "FROM clues c JOIN clue_versions cv "
+            "ON cv.clue_id=c.id AND cv.topic_id=c.topic_id AND cv.version=c.current_version "
+            "WHERE c.topic_id=? ORDER BY c.id", (topic_id,),
+        ).fetchall()
+    return [{
+        "id": r["id"], "title": r["title"], "timeline_date": r["timeline_date"],
+        "party_relevance": json.loads(r["party_relevance"] or "[]"),
+        "relevance_score": r["relevance_score"],
+    } for r in rows]
+
+
 def remap_party_in_clues(topic_id: str, old_ids: list[str], new_id: str | None) -> int:
     """Repoint clue.party_relevance after a merge/split so clues never reference a deleted party
     (⇄ TS dbReplaceClues remap). merge → new_id = target id; split → new_id = primary new id;
