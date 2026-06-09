@@ -25,7 +25,6 @@ use_default_settings:
       - arxiv
       - openalex
       - crossref
-      - pubmed
       - hackernews
       - stackoverflow
       # DROPPED (log spam, ~no payoff):
@@ -33,6 +32,8 @@ use_default_settings:
       #    usually returns an empty body → JSONDecodeError spam. arxiv/openalex/crossref cover
       #    academic already.
       #  * reddit — reddit.com blocks Tor exits ~always (403/429) → constant suspension spam.
+      #  * pubmed — BIOMEDICAL literature (eutils.ncbi), irrelevant to geopolitics, and NCBI
+      #    returns HTTP 500 for keyless/rapid queries → constant 500 traceback spam.
       # P5: mwmbl — independent self-crawled index (own crawler, api.mwmbl.org),
       # keyless and NOT a Google/Bing scraper, so immune to per-IP blocking.
       - mwmbl
@@ -105,7 +106,6 @@ engines:
   - {name: arxiv,             engine: arxiv,           disabled: false, shortcut: arx, categories: [general, science], network: {proxies: null}}
   - {name: openalex,          engine: openalex,        disabled: false, shortcut: oa,  categories: [general, science], network: {proxies: null}}
   - {name: crossref,          engine: crossref,        disabled: false, shortcut: cr,  categories: [general, science], network: {proxies: null}}
-  - {name: pubmed,            engine: pubmed,          disabled: false, shortcut: pub, categories: [general, science], network: {proxies: null}}
   - {name: hackernews,        engine: hackernews,      disabled: false, shortcut: hn,  categories: [general, it], network: {proxies: null}}
   - {name: stackoverflow,     engine: stackexchange,   disabled: false, shortcut: st,  api_site: 'stackoverflow', categories: [general, it, q&a], network: {proxies: null}}
   # semantic_scholar + reddit removed: keyless-throttled JSONDecodeError spam / reliably
