@@ -4,8 +4,9 @@ Focus: custom API-key providers (OpenAI-compatible + Anthropic-compatible) manag
 the CLIProxyAPI management API via read-modify-write. This is what lets an operator plug in
 e.g. a MiniMax key from the UI. API keys are never echoed back — only a masked hint.
 
-The interactive OAuth login flow (Google/Codex/Anthropic browser login) is not ported here;
-custom API-key providers cover the key-based use case.
+The interactive OAuth login flow (Google/Codex/Anthropic browser login) is now ported: both
+custom API-key providers AND the OAuth login initiate + status-poll (proxying the CLIProxyAPI
+management auth-url / get-auth-status endpoints) are present.
 """
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -131,6 +132,59 @@ async def delete_custom(kind: str, id: str):
     except ManagementError as e:
         raise HTTPException(status_code=502, detail={"message": str(e)})
     return {"ok": True}
+
+
+# ── Interactive OAuth login (⇄ TS routes/providers.ts /login + /login/status) ─────
+class LoginBody(BaseModel):
+    provider: str
+
+
+def _norm(p: str) -> str:
+    return (p or "").lower().strip()
+
+
+def _mgmt_error(e: Exception):
+    if isinstance(e, ManagementUnavailable):
+        raise HTTPException(status_code=503, detail={"error": "management_unavailable", "message": str(e)})
+    if isinstance(e, ManagementError):
+        raise HTTPException(status_code=(401 if e.status == 401 else 502),
+                            detail={"error": "management_error", "message": str(e)})
+    raise HTTPException(status_code=500, detail={"error": "error", "message": str(e)})
+
+
+@router.post("/api/providers/login")
+async def provider_login(body: LoginBody):
+    """Begin an OAuth login: the proxy returns a browser URL + a state to poll (⇄ TS /login)."""
+    provider = _norm(body.provider)
+    endpoint = proxy_admin.AUTH_URL_ENDPOINT.get(provider)
+    if not endpoint:
+        raise HTTPException(status_code=400,
+                            detail={"error": "bad_request", "message": f'Unsupported provider "{provider}"'})
+    try:
+        data = await proxy_admin.get_provider_auth_url(endpoint)
+    except (ManagementUnavailable, ManagementError) as e:
+        _mgmt_error(e)
+    return {"provider": provider, "oauth_url": data.get("url"), "state": data.get("state"), "status": "started"}
+
+
+@router.get("/api/providers/login/status")
+async def provider_login_status(provider: str = "", state: str = ""):
+    """Poll an in-progress OAuth login by its state token (⇄ TS /login/status). Never 5xx —
+    any failure is reported as not-yet-connected."""
+    prov = _norm(provider)
+    if not state:
+        return {"provider": prov, "connected": False, "timeout": False}
+    try:
+        data = await proxy_admin.get_auth_status(state)
+    except Exception:  # noqa: BLE001 — ⇄ TS swallows: poll keeps going, never 5xx
+        return {"provider": prov, "connected": False, "timeout": False}
+    status = data.get("status")
+    if status == "ok":
+        lm.invalidate_models()  # ⇄ invalidateVerifiedModels — pick up the newly-authed models
+        return {"provider": prov, "connected": True, "timeout": False}
+    if status == "error":
+        return {"provider": prov, "connected": False, "timeout": False, "error": "Authorization failed"}
+    return {"provider": prov, "connected": False, "timeout": False}
 
 
 @router.get("/api/providers/health")

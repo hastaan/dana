@@ -180,6 +180,40 @@ async def list_representatives(topic_id: str) -> list[dict]:
     } for r in rows]
 
 
+async def list_states(topic_id: str) -> list[dict]:
+    """⇄ TS dbGetAllStates → rowToState. Version-history for the version selector.
+    No 404 guard — unknown topic returns []. Returns the FULL KnowledgeState shape."""
+    async with get_engine().connect() as conn:
+        rows = (await conn.execute(
+            text("SELECT * FROM states WHERE topic_id=:t ORDER BY version ASC"), {"t": topic_id}
+        )).mappings().all()
+    out = []
+    for r in rows:
+        try:
+            clue_snap = json.loads(r["clue_snapshot"]) if r["clue_snapshot"] else {"count": 0, "ids_and_versions": {}}
+        except (ValueError, TypeError, json.JSONDecodeError):
+            clue_snap = {"count": 0, "ids_and_versions": {}}
+        try:
+            completed = json.loads(r["completed_stages"]) if r["completed_stages"] else []
+        except (ValueError, TypeError, json.JSONDecodeError):
+            completed = []
+        try:
+            delta_summary = json.loads(r["delta_summary"]) if r["delta_summary"] else None
+        except (ValueError, TypeError, json.JSONDecodeError):
+            delta_summary = None
+        out.append({
+            "version": r["version"], "label": r["label"], "created_at": r["created_at"],
+            "trigger": r["trigger"], "clue_snapshot": clue_snap,
+            "forum_session_id": r["forum_session_id"], "verdict_id": r["verdict_id"],
+            "delta_from": r["delta_from"], "delta_summary": delta_summary,
+            "parent_version": r["parent_version"], "fork_stage": r["fork_stage"],
+            "version_status": r["version_status"] or "complete",
+            "parties_snapshot": r["parties_snapshot"], "representatives_snapshot": r["representatives_snapshot"],
+            "completed_stages": completed,
+        })
+    return out
+
+
 async def get_resolution(topic_id: str, version: int) -> dict | None:
     async with get_engine().connect() as conn:
         r = (await conn.execute(

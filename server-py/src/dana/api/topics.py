@@ -20,6 +20,15 @@ class CreateTopic(BaseModel):
     description: str = ""
 
 
+class PartialTopicBody(BaseModel):
+    model_config = {"extra": "ignore"}
+    title: str | None = None
+    description: str | None = None
+    status: str | None = None
+    models: dict[str, str] | None = None
+    settings: dict | None = None
+
+
 class AnalystGuidance(BaseModel):
     """Per-topic operator steering (guides METHOD, not the conclusion). All fields optional."""
     framing_note: str | None = None
@@ -80,12 +89,30 @@ async def create_topic(body: CreateTopic):
     return await asyncio.to_thread(writers.create_topic, body.title, body.description)
 
 
+@router.put("/api/topics/{topic_id}")
+async def update_topic(topic_id: str, body: PartialTopicBody):
+    """Partial topic edit (⇄ TS PUT /:id → dbUpdateTopic). Only sent fields patch (exclude_unset
+    mirrors t.Partial); ONE-LEVEL settings merge; models replaced wholesale; bumps updated_at."""
+    patch = body.model_dump(exclude_unset=True)
+    updated = await asyncio.to_thread(writers.update_topic, topic_id, patch)
+    if updated is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+    return updated
+
+
 @router.get("/api/topics/{topic_id}")
 async def get_topic(topic_id: str):
     topic = await topics_repo.get_topic(topic_id)
     if topic is None:
         raise HTTPException(status_code=404, detail={"message": "Topic not found"})
     return topic
+
+
+@router.get("/api/topics/{topic_id}/states")
+async def get_states(topic_id: str):
+    """Version history for the version selector (⇄ TS GET /:id/states → getAllVersions).
+    No 404 guard — unknown topic returns []."""
+    return await reads.list_states(topic_id)
 
 
 @router.delete("/api/topics/{topic_id}")

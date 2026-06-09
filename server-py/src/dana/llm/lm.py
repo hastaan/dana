@@ -37,6 +37,12 @@ async def list_models(force: bool = False) -> list[str]:
     return ids
 
 
+def invalidate_models() -> None:
+    """Drop the cached model list so the next list_models() refetches (⇄ invalidateVerifiedModels)."""
+    global _models_cache
+    _models_cache = None
+
+
 async def resolve_available_model(requested: str) -> str:
     """Fall back to an available model when the requested one isn't served
     (⇄ modelCatalog.resolveAvailableModel). Phase-0 fallback is first-available;

@@ -54,6 +54,34 @@ def set_topic_status(topic_id: str, status: str) -> None:
         c.execute("UPDATE topics SET status=?, updated_at=? WHERE id=?", (status, ISO(), topic_id))
 
 
+def update_topic(topic_id: str, patch: dict) -> dict | None:
+    """⇄ TS dbUpdateTopic. Partial {title,description,status,models,settings}. ONE-LEVEL
+    settings merge (so a partial settings patch never wipes sibling keys like 'steering');
+    models replaced wholesale; id immutable; bump updated_at. None when the topic is absent."""
+    with connect() as c:
+        row = c.execute("SELECT * FROM topics WHERE id=?", (topic_id,)).fetchone()
+        if row is None:
+            return None
+        existing = {
+            "id": row["id"], "title": row["title"], "description": row["description"],
+            "status": row["status"], "current_version": row["current_version"],
+            "models": json.loads(row["models"] or "{}"), "settings": json.loads(row["settings"] or "{}"),
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+        }
+        merged_settings = (
+            {**existing["settings"], **patch["settings"]}
+            if isinstance(patch.get("settings"), dict) else existing["settings"]
+        )
+        now = ISO()
+        updated = {**existing, **patch, "settings": merged_settings, "id": topic_id, "updated_at": now}
+        c.execute(
+            "UPDATE topics SET title=?, description=?, status=?, current_version=?, models=?, settings=?, updated_at=? WHERE id=?",
+            (updated["title"], updated["description"], updated["status"], updated["current_version"],
+             json.dumps(updated["models"]), json.dumps(updated["settings"]), now, topic_id),
+        )
+    return updated
+
+
 # ── Deletes (card actions: DELETE /topics/:id, …/parties/:id, …/clues/:id) ──────
 # Every topic-scoped table carries a `topic_id`. Not all declare ON DELETE CASCADE
 # (forum_rounds/scratchpads/supervisor_state/synthesis_cache don't), so we wipe each

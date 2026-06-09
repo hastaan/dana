@@ -90,3 +90,37 @@ async def management_status() -> dict:
         return {"reachable": False, "reason": str(e)}
     except ManagementError as e:
         return {"reachable": False, "reason": str(e), "status": e.status}
+
+
+# ── OAuth (interactive provider login) ⇄ TS proxyAdmin getProviderAuthUrl / getAuthStatus ──
+AUTH_URL_ENDPOINT = {
+    "claude": "anthropic-auth-url",
+    "openai": "codex-auth-url",
+    "gemini": "gemini-cli-auth-url",
+}
+
+
+async def _get_json(path: str) -> dict:
+    res = await _fetch("GET", path)
+    if res.status_code == 401:
+        raise ManagementError("Proxy management rejected the key (401)", 401)
+    if res.status_code == 404:
+        raise ManagementUnavailable(f"Endpoint {path} not found (404) — management disabled or unsupported")
+    if res.status_code >= 400:
+        raise ManagementError(f"GET {path} failed (HTTP {res.status_code})", res.status_code)
+    try:
+        data = res.json()
+    except Exception as e:  # noqa: BLE001 — non-JSON body, ⇄ TS mgmtJson 502
+        raise ManagementError(f"GET {path} returned non-JSON", 502) from e
+    return data if isinstance(data, dict) else {}
+
+
+async def get_provider_auth_url(endpoint: str) -> dict:
+    """⇄ getProviderAuthUrl: GET /{anthropic|codex|gemini-cli}-auth-url → {url, state}."""
+    return await _get_json(f"/{endpoint}")
+
+
+async def get_auth_status(state: str) -> dict:
+    """⇄ getAuthStatus: GET /get-auth-status?state=<s> → {status}."""
+    from urllib.parse import quote
+    return await _get_json(f"/get-auth-status?state={quote(state, safe='')}")
