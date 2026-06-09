@@ -69,6 +69,7 @@ Playwright-grade fetch (opt-in, no API key — HEAVY build-from-source):
 
 Local development (needs Bun + a proxy on :8317):
   dev            Run backend (:$PORT) + frontend dev server (:5173)
+  test           Run no-network unit tests (server-py pytest + backend bun test)
 
 Setup:
   link           Symlink \`dana\` onto your PATH (run it from anywhere)
@@ -87,6 +88,30 @@ dev() {
   local front=$!
   trap 'kill "$back" "$front" 2>/dev/null || true' INT TERM
   wait
+}
+
+# Pure-logic unit tests — NO network, NO LLM, NO secrets. Runs the server-py pytest suite
+# (test_*.py) and the backend bun tests under app/backend/src/. Used locally and in CI.
+test() {
+  local rc=0
+  echo "== server-py: pytest (no-network unit tests) =="
+  if command -v uv >/dev/null 2>&1; then
+    ( cd "$DANA_DIR/server-py" && uv run --extra dev --extra dspy pytest -q ) || rc=1
+  elif [ -x "$DANA_DIR/server-py/.venv/bin/python" ]; then
+    ( cd "$DANA_DIR/server-py" && .venv/bin/python -m pytest -q ) || rc=1
+  else
+    echo "  (skipped — neither uv nor server-py/.venv found)"; rc=1
+  fi
+
+  echo
+  echo "== app/backend: bun test (no-network unit tests under src/) =="
+  if command -v bun >/dev/null 2>&1; then
+    ( cd "$DANA_DIR/app/backend" && bun install >/dev/null 2>&1 && bun test src/ ) || rc=1
+  else
+    echo "  (skipped — bun is not installed — see https://bun.sh)"; rc=1
+  fi
+
+  return "$rc"
 }
 
 link() {
@@ -115,6 +140,7 @@ case "$cmd" in
   firecrawl-logs)    fc logs -f "$@" ;;
   update)         ( cd "$DANA_DIR" && git pull --ff-only ) && dc build && dc up -d && echo "Updated → http://localhost:$PORT" ;;
   dev)            dev ;;
+  test)           test "$@" ;;
   link)           link ;;
   help|-h|--help) usage ;;
   *)              echo "dana: unknown command '$cmd'" >&2; echo; usage; exit 1 ;;

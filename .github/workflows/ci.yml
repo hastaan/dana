@@ -1,0 +1,60 @@
+# CI — pure-logic unit tests only. NO network, NO LLM, NO secrets (SearXNG/LLM are mocked or
+# untouched). Two independent jobs: server-py pytest and app/backend bun test.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: server-py · pytest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server-py
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      # Install the package + the 'dev' extra (pytest). The 'dspy' extra is needed because
+      # agents/scenario_scorer.py imports dspy at module load (the _normalize test imports it).
+      - name: Install (dev + dspy extras)
+        run: uv sync --extra dev --extra dspy
+
+      - name: Run pytest (no-network unit tests)
+        run: uv run --extra dev --extra dspy pytest -q
+
+  bun:
+    name: app/backend · bun test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install backend deps
+        run: bun install --frozen-lockfile || bun install
+
+      # Only the no-network unit tests under src/ (mocked fetch — never hits the network).
+      - name: Run bun test (src/)
+        run: bun test src/

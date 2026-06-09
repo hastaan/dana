@@ -19,6 +19,21 @@ dependencies = [
 # DSPy stack — added in Phase 1 (research engine). Kept optional so Phase-0 plumbing
 # installs fast and the app runs without the heavier ML deps.
 dspy = ["dspy>=2.5", "litellm>=1.50"]
+# Dev tooling: pure-logic unit tests (no network/LLM). `uv sync --extra dev` or
+# `uv run --extra dev pytest`.
+dev = ["pytest>=8.0"]
+
+[dependency-groups]
+# Same set exposed as a PEP 735 dependency-group so `uv run pytest` picks it up by default.
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+# Only the pure-logic unit tests (test_*.py); the smoke_*.py scripts hit the DB/LLM and are
+# run by hand, not in CI. pythonpath=src lets `import dana...` resolve from the src layout.
+addopts = "-q"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["src"]
 
 [build-system]
 requires = ["hatchling"]
