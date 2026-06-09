@@ -26,10 +26,13 @@ use_default_settings:
       - openalex
       - crossref
       - pubmed
-      - semantic scholar
-      - reddit
       - hackernews
       - stackoverflow
+      # DROPPED (log spam, ~no payoff):
+      #  * semantic scholar — keyless API is throttled to a tiny GLOBAL anon quota, so it
+      #    usually returns an empty body → JSONDecodeError spam. arxiv/openalex/crossref cover
+      #    academic already.
+      #  * reddit — reddit.com blocks Tor exits ~always (403/429) → constant suspension spam.
       # P5: mwmbl — independent self-crawled index (own crawler, api.mwmbl.org),
       # keyless and NOT a Google/Bing scraper, so immune to per-IP blocking.
       - mwmbl
@@ -103,11 +106,10 @@ engines:
   - {name: openalex,          engine: openalex,        disabled: false, shortcut: oa,  categories: [general, science], network: {proxies: null}}
   - {name: crossref,          engine: crossref,        disabled: false, shortcut: cr,  categories: [general, science], network: {proxies: null}}
   - {name: pubmed,            engine: pubmed,          disabled: false, shortcut: pub, categories: [general, science], network: {proxies: null}}
-  - {name: semantic scholar,  engine: semantic_scholar, disabled: false, shortcut: se, categories: [general, science], network: {proxies: null}}
   - {name: hackernews,        engine: hackernews,      disabled: false, shortcut: hn,  categories: [general, it], network: {proxies: null}}
   - {name: stackoverflow,     engine: stackexchange,   disabled: false, shortcut: st,  api_site: 'stackoverflow', categories: [general, it, q&a], network: {proxies: null}}
-  # Reddit blocks BOTH datacenter IPs and many Tor exits — keep it on Tor (default), bonus only.
-  - {name: reddit,            engine: reddit,          disabled: false, shortcut: re,  categories: [general, social media]}
+  # semantic_scholar + reddit removed: keyless-throttled JSONDecodeError spam / reliably
+  # Tor-blocked (403), respectively — pure log noise, no coverage the backbone lacks.
 
   # P5: mwmbl is an INDEPENDENT engine with its OWN distributed crawler + index
   # (~500M URLs, api.mwmbl.org) — keyless (require_api_key=False) and NOT a
