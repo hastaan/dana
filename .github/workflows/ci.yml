@@ -1,5 +1,6 @@
 # CI — pure-logic unit tests only. NO network, NO LLM, NO secrets (SearXNG/LLM are mocked or
-# untouched). Two independent jobs: server-py pytest and app/backend bun test.
+# untouched). One job: server-py pytest. (The TS backend was retired in the cutover, so the
+# old app/backend bun-test job is gone.)
 name: ci
 
 on:
@@ -37,24 +38,3 @@ jobs:
 
       - name: Run pytest (no-network unit tests)
         run: uv run --extra dev --extra dspy pytest -q
-
-  bun:
-    name: app/backend · bun test
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: app/backend
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install backend deps
-        run: bun install --frozen-lockfile || bun install
-
-      # Only the no-network unit tests under src/ (mocked fetch — never hits the network).
-      - name: Run bun test (src/)
-        run: bun test src/

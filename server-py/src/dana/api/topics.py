@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -13,6 +14,29 @@ router = APIRouter()
 class CreateTopic(BaseModel):
     title: str
     description: str = ""
+
+
+class AnalystGuidance(BaseModel):
+    """Per-topic operator steering (guides METHOD, not the conclusion). All fields optional."""
+    framing_note: str | None = None
+    research_guidance: str | None = None
+    evidence_guidance: str | None = None
+    debate_guidance: str | None = None
+
+
+class SteeringBody(BaseModel):
+    steering: AnalystGuidance | None = None
+
+
+def _topic_settings(topic: dict) -> dict:
+    """topics.settings may be a JSON string or a dict depending on the read path."""
+    s = topic.get("settings") or {}
+    if isinstance(s, str):
+        try:
+            s = json.loads(s or "{}")
+        except Exception:  # noqa: BLE001
+            s = {}
+    return s if isinstance(s, dict) else {}
 
 
 @router.get("/api/topics")
@@ -38,6 +62,29 @@ async def delete_topic(topic_id: str):
     """Delete a topic and all its data (Dashboard TopicCard delete)."""
     await asyncio.to_thread(writers.delete_topic, topic_id)
     return {"success": True}
+
+
+# ── Per-topic operator steering (Save guidance — TopicView/VerdictPanel) ───────────
+# Stored in topics.settings.steering; the pipeline reads it via llm/steering.steering_for().
+@router.get("/api/topics/{topic_id}/steering")
+async def get_steering(topic_id: str):
+    topic = await topics_repo.get_topic(topic_id)
+    if topic is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+    return {"steering": _topic_settings(topic).get("steering") or {}}
+
+
+@router.put("/api/topics/{topic_id}/steering")
+async def put_steering(topic_id: str, body: SteeringBody):
+    topic = await topics_repo.get_topic(topic_id)
+    if topic is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+    settings = _topic_settings(topic)
+    guidance = body.steering.model_dump() if body.steering else {}
+    # Keep only the non-empty guidance fields (so clearing a field removes it).
+    settings["steering"] = {k: v for k, v in guidance.items() if v}
+    await asyncio.to_thread(writers.set_topic_settings, topic_id, settings)
+    return {"steering": settings["steering"]}
 
 
 @router.get("/api/topics/{topic_id}/parties")
