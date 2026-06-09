@@ -197,7 +197,11 @@ class StormResearchEngine:
                 "source_urls": urls[:8], "source_outlets": outlets[:8],
                 "domain_tags": [persona.name] if persona.kind == "lens" else [],
             })
-            emit({"type": "clue_discovered", "clue": {"title": d.title, "persona": persona.name}})
+            # Shape MUST match the frontend (PipelineActivityFeed / useSSE clue_discovered:
+            # {clue_id, title, source, relevance}) — a nested {clue:{…}} rendered as
+            # "undefined · relevance NaN". relevance is already 0-100 (ClueDraft.relevance).
+            emit({"type": "clue_discovered", "clue_id": writers.slugify(d.title),
+                  "title": d.title, "source": persona.name, "relevance": d.relevance})
         return clues
 
     # ── Phase 3.5: consolidate parties (ADD missed externals + GROUP into alliances) ──
