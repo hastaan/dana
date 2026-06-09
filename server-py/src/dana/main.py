@@ -33,6 +33,16 @@ from .events.bus import bus
 async def lifespan(app: FastAPI):
     # Bind the running loop so the (thread-safe) event bus can schedule deliveries.
     bus.bind_loop(asyncio.get_running_loop())
+    # Claim DSPy's settings owner on THIS (main) thread and set the global default LM once.
+    # DSPy only lets the first-configuring thread call dspy.configure(); worker threads use
+    # dspy_lm.lm_context() (thread-local) instead. Best-effort: the proxy may be unreachable
+    # at boot (make_lm → pick_model does a network probe) — that must not crash startup, and
+    # workers don't depend on this default anyway (each lm_context builds its own LM).
+    from .llm import dspy_lm
+    try:
+        dspy_lm.configure()
+    except Exception:  # noqa: BLE001
+        pass
     yield
     await dispose_engine()
 

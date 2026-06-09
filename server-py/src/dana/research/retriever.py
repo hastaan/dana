@@ -83,9 +83,16 @@ class DanaRetriever:
                     results = web_search(q, num_results=self.top_k)
                     self.budget.searches_used += 1
                     did_live = True
-                    writers.corpus_store_search(self.topic_id, q, results)
                 except Exception:  # noqa: BLE001
                     results = []
+                # Corpus caching is BEST-EFFORT and MUST NOT discard freshly-fetched results.
+                # (An ad-hoc topic_id like "adhoc-lookup" has no row in `topics`, so the
+                # research_searches FK throws — previously that landed in the except above and
+                # silently wiped `results`, making every ad-hoc deep_lookup INSUFFICIENT_EVIDENCE.)
+                try:
+                    writers.corpus_store_search(self.topic_id, q, results)
+                except Exception:  # noqa: BLE001
+                    pass
             # results are already relevance-ranked by web_search.rerank_results (and cached
             # results were stored post-rank), so iterate as-is — one ranking site, no divergence.
             for r in results[: self.top_k]:

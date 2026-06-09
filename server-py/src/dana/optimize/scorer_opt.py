@@ -179,14 +179,14 @@ def optimize_scorer(min_examples: int = MIN_EXAMPLES,
         return None
 
     log.info("optimize-scorer: compiling ScenarioScorer on %d resolved example(s)…", n)
-    dspy_lm.configure()
-    optimizer = _make_optimizer(n)
-    compiled = optimizer.compile(ScenarioScorer(), trainset=trainset)
+    with dspy_lm.lm_context():
+        optimizer = _make_optimizer(n)
+        compiled = optimizer.compile(ScenarioScorer(), trainset=trainset)
 
-    save_path = Path(save_path)
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    compiled.save(str(save_path))
-    mean_score = sum(brier_metric(ex, compiled(**ex.inputs())) for ex in trainset) / n  # noqa: E501
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        compiled.save(str(save_path))
+        mean_score = sum(brier_metric(ex, compiled(**ex.inputs())) for ex in trainset) / n  # noqa: E501
     log.info("optimize-scorer: saved compiled program → %s (train metric ≈ %.3f)",
              save_path, mean_score)
     return compiled

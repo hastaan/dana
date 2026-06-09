@@ -1,4 +1,4 @@
-"""Page fetch (⇄ TS tools/external/httpFetch.ts): Firecrawl → Jina → raw+strip.
+"""Page fetch (⇄ TS tools/external/httpFetch.ts): Firecrawl → direct → curl-cffi → Jina → raw+strip.
 
 Gives the grounded researcher real content instead of thin search snippets. Sync.
 """
@@ -44,7 +44,30 @@ def http_fetch(url: str, max_chars: int = 4000) -> tuple[str, str] | None:
     except Exception:  # noqa: BLE001
         pass
 
-    # 3. Jina reader (hosted, no key)
+    # 3. curl-cffi with a real-Chrome TLS/JA3 fingerprint (defeats fingerprint-based blocks &
+    #    basic Cloudflare gates) — no browser, no service, no key. Lazy import so the module
+    #    loads even if curl-cffi isn't installed; this tier just self-skips then.
+    try:
+        import curl_cffi
+
+        r = curl_cffi.get(
+            url,
+            impersonate="chrome",
+            headers={"Accept": "text/html"},
+            timeout=20,
+            allow_redirects=True,
+        )
+        if r.status_code == 200 and r.text:
+            html = r.text
+            import trafilatura
+
+            txt = trafilatura.extract(html, include_comments=False, include_tables=False, favor_recall=True)
+            if txt and len(txt.strip()) > 250:
+                return url, txt.strip()[:max_chars]
+    except Exception:  # noqa: BLE001
+        pass
+
+    # 4. Jina reader (hosted, no key)
     try:
         r = httpx.get(f"{_JINA}{url}", headers={"Accept": "application/json", "User-Agent": _UA}, timeout=20.0)
         if r.status_code == 200:
@@ -55,7 +78,7 @@ def http_fetch(url: str, max_chars: int = 4000) -> tuple[str, str] | None:
     except Exception:  # noqa: BLE001
         pass
 
-    # 4. Raw strip-tags (last resort)
+    # 5. Raw strip-tags (last resort)
     if html:
         stripped = re.sub(r"<(script|style)\b.*?</\1>", " ", html, flags=re.S | re.I)
         text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", stripped)).strip()

@@ -21,9 +21,9 @@ async def run_discovery(topic_id: str, title: str, description: str, cfg: Resear
     emit({"type": "progress", "stage": "discovery", "pct": 0.0, "msg": "Starting discovery…"})
 
     def _work() -> dict:
-        dspy_lm.configure()  # configure the DSPy LM (sync) in this worker thread
-        engine = StormResearchEngine(topic_id, cfg)
-        return engine.run(title, description, emit)
+        with dspy_lm.lm_context():  # thread-local LM for this worker thread
+            engine = StormResearchEngine(topic_id, cfg)
+            return engine.run(title, description, emit)
 
     result = await asyncio.to_thread(_work)
 
@@ -35,18 +35,18 @@ async def run_discovery(topic_id: str, title: str, description: str, cfg: Resear
 
         def _deepen() -> None:
             from ..research.deep_search import deep_search
-            dspy_lm.configure()
-            for clue in result["clues"][:n]:
-                subject = clue.get("title") or (clue.get("summary", "")[:80])
-                try:
-                    ds = deep_search(subject, breadth="clue", topic_id=topic_id)
-                except Exception:  # noqa: BLE001
-                    continue
-                if ds.get("content"):
-                    clue["summary"] = (clue.get("summary", "") + "\n\nDeep research: "
-                                       + ds["content"][:1500]).strip()
-                    urls = list(dict.fromkeys(clue.get("source_urls", []) + ds.get("source_urls", [])))
-                    clue["source_urls"] = urls[:10]
+            with dspy_lm.lm_context():
+                for clue in result["clues"][:n]:
+                    subject = clue.get("title") or (clue.get("summary", "")[:80])
+                    try:
+                        ds = deep_search(subject, breadth="clue", topic_id=topic_id)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    if ds.get("content"):
+                        clue["summary"] = (clue.get("summary", "") + "\n\nDeep research: "
+                                           + ds["content"][:1500]).strip()
+                        urls = list(dict.fromkeys(clue.get("source_urls", []) + ds.get("source_urls", [])))
+                        clue["source_urls"] = urls[:10]
 
         await asyncio.to_thread(_deepen)
         emit({"type": "think", "icon": "🔬", "label": "Clue deep-research",

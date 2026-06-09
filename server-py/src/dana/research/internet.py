@@ -74,29 +74,29 @@ def deep_lookup(
         emit({"type": "think", "icon": "💾", "label": "Cached lookup", "detail": query[:80]})
         return {**cached, "cached": True}
 
-    dspy_lm.configure()
-    emit({"type": "progress", "stage": "deep_lookup", "pct": 0.1, "msg": f"Looking up: {query[:80]}"})
-    budget = ResearchBudget(max_searches=top_k + 2)
-    retriever = DanaRetriever(topic_id, budget, top_k=top_k, fetch_top=fetch_top)
-    researcher = GroundedResearcher(retriever, max_queries=max_sub_questions)
-    emit({"type": "think", "icon": "🔎", "label": "Deep lookup", "detail": query[:100]})
-    pred = researcher(topic=topic or query, question=query, persona=persona)
-    for sub in getattr(pred, "queries", []) or []:
-        emit({"type": "think", "icon": "❓", "label": "Sub-question", "detail": str(sub)[:100]})
-    sources = [{"title": i.title, "url": i.url} for i in pred.retrieved]
-    result = {
-        "status": "success", "level": "deep_lookup", "query": query,
-        "answer": pred.answer,
-        "context": _fmt_info(pred.retrieved),
-        "sources": sources,
-        "source_urls": [s["url"] for s in sources],
-        "source_count": len(sources),
-        "searches_used": budget.searches_used,
-    }
-    emit({"type": "progress", "stage": "deep_lookup", "pct": 1.0,
-          "msg": f"Lookup complete — {len(sources)} sources"})
-    writers.cache_synthesis(topic_id, "deep_lookup", ckey, result)
-    return result
+    with dspy_lm.lm_context():
+        emit({"type": "progress", "stage": "deep_lookup", "pct": 0.1, "msg": f"Looking up: {query[:80]}"})
+        budget = ResearchBudget(max_searches=top_k + 2)
+        retriever = DanaRetriever(topic_id, budget, top_k=top_k, fetch_top=fetch_top)
+        researcher = GroundedResearcher(retriever, max_queries=max_sub_questions)
+        emit({"type": "think", "icon": "🔎", "label": "Deep lookup", "detail": query[:100]})
+        pred = researcher(topic=topic or query, question=query, persona=persona)
+        for sub in getattr(pred, "queries", []) or []:
+            emit({"type": "think", "icon": "❓", "label": "Sub-question", "detail": str(sub)[:100]})
+        sources = [{"title": i.title, "url": i.url} for i in pred.retrieved]
+        result = {
+            "status": "success", "level": "deep_lookup", "query": query,
+            "answer": pred.answer,
+            "context": _fmt_info(pred.retrieved),
+            "sources": sources,
+            "source_urls": [s["url"] for s in sources],
+            "source_count": len(sources),
+            "searches_used": budget.searches_used,
+        }
+        emit({"type": "progress", "stage": "deep_lookup", "pct": 1.0,
+              "msg": f"Lookup complete — {len(sources)} sources"})
+        writers.cache_synthesis(topic_id, "deep_lookup", ckey, result)
+        return result
 
 
 # ── async facade with graceful tier fallback ─────────────────────────────────────

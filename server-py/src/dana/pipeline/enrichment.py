@@ -25,9 +25,9 @@ async def run_enrichment(topic_id: str, title: str, description: str, cfg: Resea
     seen_titles = {(c.get("title") or "").strip().lower() for c in existing}
 
     def _work() -> dict:
-        dspy_lm.configure()
-        engine = StormResearchEngine(topic_id, cfg)
-        return engine.enrich(title, description, parties, emit)
+        with dspy_lm.lm_context():
+            engine = StormResearchEngine(topic_id, cfg)
+            return engine.enrich(title, description, parties, emit)
 
     result = await asyncio.to_thread(_work)
 

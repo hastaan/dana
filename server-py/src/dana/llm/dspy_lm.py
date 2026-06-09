@@ -8,6 +8,8 @@ Robustness (Phase A of the internet-lookup workflow): every completion is routed
 job of the reference stack's strip-think proxy into our single LM chokepoint), and litellm
 retries with backoff on transient proxy/rate-limit errors.
 """
+import contextlib
+
 import dspy
 import httpx
 
@@ -62,17 +64,45 @@ def make_lm(model: str | None = None, **kwargs) -> dspy.LM:
     )
 
 
-def configure(model: str | None = None, **kwargs) -> dspy.LM:
-    lm = make_lm(model, **kwargs)
-    dspy.configure(lm=lm)
-    # Install any operator instruction-overrides onto the DSPy signatures BEFORE the pipeline
-    # stage constructs its modules (every stage builds its modules right after this call). With
-    # no overrides set this restores every signature to its shipped default → a no-op. Imported
-    # lazily to avoid a circular import (llm.prompts imports the signatures, which is fine, but
-    # keeping it lazy also means a failure here can never break LM configuration).
+def _apply_overrides() -> None:
+    """Install any operator instruction-overrides onto the DSPy signature classes IN PLACE
+    (a process-wide mutation), BEFORE the caller constructs its DSPy modules — every stage
+    builds its modules right after entering the LM context. With no overrides set this
+    restores every signature to its shipped default → a no-op. Imported lazily to avoid a
+    circular import (llm.prompts imports the signatures); a failure here can never break LM
+    setup."""
     try:
         from . import prompts as _prompts
         _prompts.apply_overrides()
-    except Exception:  # noqa: BLE001 — overrides are best-effort; never break configure()
+    except Exception:  # noqa: BLE001 — overrides are best-effort; never break LM setup
         pass
+
+
+def configure(model: str | None = None, **kwargs) -> dspy.LM:
+    """Set the PROCESS-WIDE default DSPy LM. Call ONCE from the main thread at startup
+    (see main.lifespan). DSPy's settings can only be (re)configured by the thread that first
+    called dspy.configure(), so worker threads MUST NOT call this — they use `lm_context()`
+    (thread-local) instead. Safe to call repeatedly from the owning (main) thread."""
+    lm = make_lm(model, **kwargs)
+    dspy.configure(lm=lm)
+    _apply_overrides()
     return lm
+
+
+@contextlib.contextmanager
+def lm_context(model: str | None = None, **kwargs):
+    """Per-request LM setup usable from ANY thread (e.g. asyncio.to_thread workers).
+
+    Uses dspy.context() — a thread-local override (contextvars) — instead of dspy.configure(),
+    which DSPy restricts to the single thread that first configured it (configuring from a
+    worker raises 'dspy.settings can only be changed by the thread that initially configured
+    it'). Builds a fresh LM, applies the instruction-overrides (global Signature mutation, so
+    modules constructed INSIDE the `with` pick them up), then enters dspy.context(lm=lm).
+
+        with dspy_lm.lm_context():
+            module(...)
+    """
+    lm = make_lm(model, **kwargs)
+    _apply_overrides()
+    with dspy.context(lm=lm):
+        yield lm

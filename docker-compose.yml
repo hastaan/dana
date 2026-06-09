@@ -44,22 +44,39 @@ services:
     networks:
       - dana-net
 
-  # Tor SOCKS5 proxies (:9050) — SearXNG routes every engine request through them (see
-  # searxng/settings.yml `outgoing.proxies`) so engines see rotating Tor exit IPs, not this
-  # host's blocked datacenter IP. Search engines block MANY Tor exits, so we run a POOL:
-  # SearXNG rotates across them, and web_search retries on empty — the more exits, the lower
-  # the odds that every exit a query touches is simultaneously blocked. Same image
-  # localfirecrawl uses for its egress.
+  # Tor SOCKS5 egress pool (:9150) — SearXNG routes EVERY engine request through
+  # these (searxng/settings.yml `outgoing.proxies`) and round-robins per-request,
+  # so engines see many rotating Tor exit IPs instead of this host's blocked
+  # datacenter IP. Engine blocking is PER-IP, so we beat it with (1) a LARGE pool
+  # (16 instances = 16 simultaneous exits) and (2) FAST rotation: the shared
+  # ./searxng/tor/torrc sets MaxCircuitDirtiness 60 so each instance cycles its
+  # exit IP ~every 60s. Image is peterdavehello/tor-socks-proxy (actively
+  # maintained, tiny; SocksPort is 9150). dperson/torproxy was dropped: abandoned
+  # ~5y and it silently ignores TOR_MaxCircuitDirtiness (entrypoint bug #26), so
+  # we could not tune rotation on it. We mount our own torrc read-only — the
+  # image's CMD is `tor -f /etc/tor/torrc`, so the mount fully controls config.
   tor1: &tor
-    image: dperson/torproxy
+    image: peterdavehello/tor-socks-proxy:latest
     restart: unless-stopped
+    volumes:
+      - ./searxng/tor/torrc:/etc/tor/torrc:ro
     networks:
       - dana-net
-  tor2: {<<: *tor}
-  tor3: {<<: *tor}
-  tor4: {<<: *tor}
-  tor5: {<<: *tor}
-  tor6: {<<: *tor}
+  tor2:  {<<: *tor}
+  tor3:  {<<: *tor}
+  tor4:  {<<: *tor}
+  tor5:  {<<: *tor}
+  tor6:  {<<: *tor}
+  tor7:  {<<: *tor}
+  tor8:  {<<: *tor}
+  tor9:  {<<: *tor}
+  tor10: {<<: *tor}
+  tor11: {<<: *tor}
+  tor12: {<<: *tor}
+  tor13: {<<: *tor}
+  tor14: {<<: *tor}
+  tor15: {<<: *tor}
+  tor16: {<<: *tor}
 
 networks:
   dana-net:

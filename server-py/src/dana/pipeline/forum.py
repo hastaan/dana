@@ -62,9 +62,9 @@ async def run_forum(topic_id: str, title: str, description: str) -> dict:
     session_id = writers.create_forum_session(topic_id, version, "full")
 
     def _frame() -> dict:
-        dspy_lm.configure()
-        out = Moderator()(topic=topic_str, parties=parties_str, evidence=evidence_str)
-        return {"central_question": out.central_question, "points_of_contention": list(out.points_of_contention)}
+        with dspy_lm.lm_context():
+            out = Moderator()(topic=topic_str, parties=parties_str, evidence=evidence_str)
+            return {"central_question": out.central_question, "points_of_contention": list(out.points_of_contention)}
 
     framing = await asyncio.to_thread(_frame)
     directive_base = (framing["central_question"] + "\nContention: "
@@ -93,19 +93,19 @@ async def run_forum(topic_id: str, title: str, description: str) -> dict:
             ) or "(you speak first)"
 
             def _speak(_persona=persona, _phase=phase, _directive=directive, _recent=recent) -> dict:
-                dspy_lm.configure()
-                o = Representative()(
-                    topic=topic_str, persona=_persona, phase=_phase, directive=_directive,
-                    recent_turns=_recent, evidence=evidence_str,
-                )
-                return {
-                    "statement": o.statement, "position": o.position,
-                    "evidence": [e.model_dump() for e in o.evidence_cited],
-                    "challenges": [c.model_dump() for c in o.challenges],
-                    "concessions": list(o.concessions),
-                    "scenario_endorsement": o.scenario_endorsement,
-                    "clues_cited": list(o.clues_cited),
-                }
+                with dspy_lm.lm_context():
+                    o = Representative()(
+                        topic=topic_str, persona=_persona, phase=_phase, directive=_directive,
+                        recent_turns=_recent, evidence=evidence_str,
+                    )
+                    return {
+                        "statement": o.statement, "position": o.position,
+                        "evidence": [e.model_dump() for e in o.evidence_cited],
+                        "challenges": [c.model_dump() for c in o.challenges],
+                        "concessions": list(o.concessions),
+                        "scenario_endorsement": o.scenario_endorsement,
+                        "clues_cited": list(o.clues_cited),
+                    }
 
             try:
                 spoken = await asyncio.to_thread(_speak)
@@ -139,8 +139,8 @@ async def run_forum(topic_id: str, title: str, description: str) -> dict:
     transcript = "\n\n".join(f"[{t['type']}] {t['party_name']}: {t['statement']}" for t in all_turns)
 
     def _synth() -> str:
-        dspy_lm.configure()
-        return Synthesizer()(topic=topic_str, transcript=transcript[:12000]).debate_summary
+        with dspy_lm.lm_context():
+            return Synthesizer()(topic=topic_str, transcript=transcript[:12000]).debate_summary
 
     debate_summary = await asyncio.to_thread(_synth) if all_turns else ""
     writers.save_forum_scenario_summary(session_id, topic_id, _scenario_summary(scenarios, all_turns))

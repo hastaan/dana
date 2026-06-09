@@ -79,65 +79,65 @@ def deep_search(
         emit({"type": "think", "icon": "💾", "label": "Cached briefing", "detail": query[:80]})
         return {**cached, "cached": True}
 
-    dspy_lm.configure()
-    preset = BREADTH.get(breadth, BREADTH["topic"])
-    n_personas = max_personas or preset["personas"]
-    n_turns = max_turns or preset["turns"]
-    k = top_k or preset["top_k"]
+    with dspy_lm.lm_context():
+        preset = BREADTH.get(breadth, BREADTH["topic"])
+        n_personas = max_personas or preset["personas"]
+        n_turns = max_turns or preset["turns"]
+        k = top_k or preset["top_k"]
 
-    budget = ResearchBudget(max_searches=n_personas * n_turns * 2 + 4)
-    retriever = DanaRetriever(topic_id, budget, top_k=k, fetch_top=2)
-    researcher = GroundedResearcher(retriever)
-    gen_angles = dspy.Predict(ResearchAngles)
-    next_q = dspy.Predict(NextQuestion)
-    synth = dspy.ChainOfThought(SynthesizeBriefing)
+        budget = ResearchBudget(max_searches=n_personas * n_turns * 2 + 4)
+        retriever = DanaRetriever(topic_id, budget, top_k=k, fetch_top=2)
+        researcher = GroundedResearcher(retriever)
+        gen_angles = dspy.Predict(ResearchAngles)
+        next_q = dspy.Predict(NextQuestion)
+        synth = dspy.ChainOfThought(SynthesizeBriefing)
 
-    emit({"type": "progress", "stage": "deep_search", "pct": 0.05, "msg": f"Researching: {query[:80]}"})
-    angles = (gen_angles(subject=query, n=n_personas).angles or [])[:n_personas] or [query]
-    emit({"type": "think", "icon": "🧭", "label": f"{len(angles)} research angles",
-          "detail": ", ".join(angles)[:120]})
-    findings: list[tuple[str, str, list]] = []
-    sources: list[dict] = []
-    src_n: dict[str, int] = {}
+        emit({"type": "progress", "stage": "deep_search", "pct": 0.05, "msg": f"Researching: {query[:80]}"})
+        angles = (gen_angles(subject=query, n=n_personas).angles or [])[:n_personas] or [query]
+        emit({"type": "think", "icon": "🧭", "label": f"{len(angles)} research angles",
+              "detail": ", ".join(angles)[:120]})
+        findings: list[tuple[str, str, list]] = []
+        sources: list[dict] = []
+        src_n: dict[str, int] = {}
 
-    for idx, angle in enumerate(angles):
-        emit({"type": "progress", "stage": "deep_search", "pct": 0.1 + 0.8 * idx / max(1, len(angles)),
-              "msg": f"Angle: {angle[:60]} ({idx + 1}/{len(angles)})"})
-        emit({"type": "think", "icon": "🔭", "label": "Research angle", "detail": angle[:100]})
-        known = ""
-        for _ in range(n_turns):
-            if not budget.can_search():
-                break
-            q = next_q(subject=query, angle=angle, known=known or "nothing yet").question
-            if "NO_FURTHER" in q.upper():
-                break
-            emit({"type": "think", "icon": "🔎", "label": f"{angle[:40]} asks", "detail": q[:100]})
-            pred = researcher(topic=query, question=q, persona=angle)
-            for i in pred.retrieved:
-                if i.url and i.url not in src_n:
-                    src_n[i.url] = len(sources) + 1
-                    sources.append({"n": len(sources) + 1, "title": i.title, "url": i.url})
-            findings.append((q, pred.answer, pred.retrieved))
-            known += f"\nQ: {q}\nA: {pred.answer[:300]}"
+        for idx, angle in enumerate(angles):
+            emit({"type": "progress", "stage": "deep_search", "pct": 0.1 + 0.8 * idx / max(1, len(angles)),
+                  "msg": f"Angle: {angle[:60]} ({idx + 1}/{len(angles)})"})
+            emit({"type": "think", "icon": "🔭", "label": "Research angle", "detail": angle[:100]})
+            known = ""
+            for _ in range(n_turns):
+                if not budget.can_search():
+                    break
+                q = next_q(subject=query, angle=angle, known=known or "nothing yet").question
+                if "NO_FURTHER" in q.upper():
+                    break
+                emit({"type": "think", "icon": "🔎", "label": f"{angle[:40]} asks", "detail": q[:100]})
+                pred = researcher(topic=query, question=q, persona=angle)
+                for i in pred.retrieved:
+                    if i.url and i.url not in src_n:
+                        src_n[i.url] = len(sources) + 1
+                        sources.append({"n": len(sources) + 1, "title": i.title, "url": i.url})
+                findings.append((q, pred.answer, pred.retrieved))
+                known += f"\nQ: {q}\nA: {pred.answer[:300]}"
 
-    parts = []
-    for q, a, infos in findings:
-        cites = ", ".join(f"[{src_n[i.url]}]" for i in infos if i.url in src_n)
-        parts.append(f"Q: {q}\nA: {a}\nSources: {cites or '—'}")
-    src_list = "\n".join(f"[{s['n']}] {s['title']} — {s['url']}" for s in sources)
-    findings_text = ("\n\n".join(parts) + "\n\nSOURCES:\n" + src_list)[:14000]
-    emit({"type": "progress", "stage": "deep_search", "pct": 0.95, "msg": "Synthesizing briefing…"})
-    briefing = synth(subject=query, findings=findings_text).briefing if findings else ""
+        parts = []
+        for q, a, infos in findings:
+            cites = ", ".join(f"[{src_n[i.url]}]" for i in infos if i.url in src_n)
+            parts.append(f"Q: {q}\nA: {a}\nSources: {cites or '—'}")
+        src_list = "\n".join(f"[{s['n']}] {s['title']} — {s['url']}" for s in sources)
+        findings_text = ("\n\n".join(parts) + "\n\nSOURCES:\n" + src_list)[:14000]
+        emit({"type": "progress", "stage": "deep_search", "pct": 0.95, "msg": "Synthesizing briefing…"})
+        briefing = synth(subject=query, findings=findings_text).briefing if findings else ""
 
-    result = {
-        "status": "success", "level": "deep_search", "breadth": breadth, "query": query,
-        "content": briefing,
-        "sources": [{"title": s["title"], "url": s["url"]} for s in sources],
-        "source_urls": [s["url"] for s in sources],
-        "findings_count": len(findings),
-        "searches_used": budget.searches_used,
-    }
-    emit({"type": "progress", "stage": "deep_search", "pct": 1.0,
-          "msg": f"Briefing complete — {len(sources)} sources, {len(findings)} findings"})
-    writers.cache_synthesis(topic_id, "deep_search", cache_key, result)
-    return result
+        result = {
+            "status": "success", "level": "deep_search", "breadth": breadth, "query": query,
+            "content": briefing,
+            "sources": [{"title": s["title"], "url": s["url"]} for s in sources],
+            "source_urls": [s["url"] for s in sources],
+            "findings_count": len(findings),
+            "searches_used": budget.searches_used,
+        }
+        emit({"type": "progress", "stage": "deep_search", "pct": 1.0,
+              "msg": f"Briefing complete — {len(sources)} sources, {len(findings)} findings"})
+        writers.cache_synthesis(topic_id, "deep_search", cache_key, result)
+        return result

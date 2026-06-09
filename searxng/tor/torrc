@@ -1,0 +1,30 @@
+# Shared torrc for Dana's Tor egress pool (mounted read-only into every
+# peterdavehello/tor-socks-proxy instance at /etc/tor/torrc).
+#
+# SearXNG routes EVERY engine request through this pool (see
+# searxng/settings.yml outgoing.proxies) and round-robins across the instances
+# per-request. Search-engine blocking is PER-IP, so we beat it two ways:
+#   1. run MANY instances (more simultaneous exit IPs)              -> docker-compose.yml
+#   2. rotate each instance's exit IP FAST (MaxCircuitDirtiness)    -> here
+#
+# We bind-mount this file because the image's CMD is `tor -f /etc/tor/torrc`,
+# giving us deterministic control of every directive (the old dperson/torproxy
+# silently dropped TOR_MaxCircuitDirtiness due to an upstream entrypoint bug).
+
+# --- upstream essentials (kept identical to the image's baked-in torrc) ---
+HardwareAccel 1
+Log notice stdout
+DataDirectory /var/lib/tor
+SocksPort 0.0.0.0:9150
+DNSPort 0.0.0.0:8853
+
+# --- fast IP rotation: cycle each exit ~every 60s to dodge per-IP blocks ---
+# MaxCircuitDirtiness: max age a circuit keeps serving NEW streams before tor
+# switches to a fresh circuit (=> new exit IP). 60s is the low end of the
+# verified 60-120s window; Tor warns below ~60s, so this is the safe minimum.
+MaxCircuitDirtiness 60
+# Pre-build a replacement circuit on this cadence so rotation is seamless.
+NewCircuitPeriod 30
+# Require each circuit's relays to live in distinct /16 subnets => the exit IPs
+# we present to engines are genuinely different, not near-duplicates.
+EnforceDistinctSubnets 1

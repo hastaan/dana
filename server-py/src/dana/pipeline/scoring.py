@@ -86,14 +86,14 @@ async def run_scoring(topic_id: str, title: str, description: str) -> dict:
                     f"{' · forum debate' if forum_note else ''}"})
 
     def _work() -> dict:
-        dspy_lm.configure()
-        scorer = ScenarioScorer()
-        pred = scorer(topic=topic_str, parties_str=parties_str, evidence_str=evidence_str)
-        return {
-            "scenarios_ranked": [s.model_dump() for s in pred.scenarios_ranked],
-            "final_assessment": pred.final_assessment,
-            "confidence_note": pred.confidence_note,
-        }
+        with dspy_lm.lm_context():
+            scorer = ScenarioScorer()
+            pred = scorer(topic=topic_str, parties_str=parties_str, evidence_str=evidence_str)
+            return {
+                "scenarios_ranked": [s.model_dump() for s in pred.scenarios_ranked],
+                "final_assessment": pred.final_assessment,
+                "confidence_note": pred.confidence_note,
+            }
 
     emit({"type": "progress", "stage": "expert_council", "pct": 0.5, "msg": "Synthesizing & scoring scenarios…"})
     out = await asyncio.to_thread(_work)

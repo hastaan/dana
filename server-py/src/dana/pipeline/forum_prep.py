@@ -34,12 +34,12 @@ async def run_forum_prep(topic_id: str, title: str, description: str) -> dict:
     evidence_str = _evidence_str(clues, density)
 
     def _work() -> dict:
-        dspy_lm.configure()
-        pred = ForumPrep()(topic=topic_str, parties_str=parties_str, evidence_str=evidence_str)
-        return {
-            "weights": [w.model_dump() for w in pred.weights],
-            "representatives": [r.model_dump() for r in pred.representatives],
-        }
+        with dspy_lm.lm_context():
+            pred = ForumPrep()(topic=topic_str, parties_str=parties_str, evidence_str=evidence_str)
+            return {
+                "weights": [w.model_dump() for w in pred.weights],
+                "representatives": [r.model_dump() for r in pred.representatives],
+            }
 
     emit({"type": "progress", "stage": "forum_prep", "pct": 0.4, "msg": "Assessing party weights…"})
     out = await asyncio.to_thread(_work)

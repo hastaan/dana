@@ -9,6 +9,7 @@
 use_default_settings:
   engines:
     keep_only:
+      # General web (scrape Google/Bing/own index) — kept from before.
       - google
       - bing
       - brave
@@ -16,6 +17,22 @@ use_default_settings:
       - qwant
       - mojeek
       - wikipedia
+      - wikidata
+      # Keyless engines that hit their OWN public APIs (never scrape Google/Bing,
+      # so they never hit the datacenter-IP anti-bot wall). Each is re-homed into
+      # the `general` category in the engines: block below so it actually runs for
+      # Dana's category-less JSON queries.
+      - arxiv
+      - openalex
+      - crossref
+      - pubmed
+      - semantic scholar
+      - reddit
+      - hackernews
+      - stackoverflow
+      # P5: mwmbl — independent self-crawled index (own crawler, api.mwmbl.org),
+      # keyless and NOT a Google/Bing scraper, so immune to per-IP blocking.
+      - mwmbl
 
 search:
   formats:
@@ -28,8 +45,9 @@ server:
   secret_key: "4ced9d1ff16fbce79a94aea9c729277b6f755f02c68fd973"
 
 # Route every engine request through Tor so search engines see rotating Tor exit IPs
-# instead of this server's (blocked) datacenter IP. The `tor` service (dperson/torproxy)
-# exposes SOCKS5 on :9050; socks5h:// resolves DNS through Tor too. Tor circuits are slow,
+# instead of this server's (blocked) datacenter IP. The tor pool (peterdavehello/tor-socks-proxy)
+# exposes SOCKS5 on :9150 and rotates exit IPs ~every 60s (MaxCircuitDirtiness in searxng/tor/torrc);
+# socks5h:// resolves DNS through Tor too. Tor circuits are slow,
 # so timeouts are raised. If `tor` is down, SearXNG simply can't reach engines (honest empty).
 outgoing:
   request_timeout: 12.0
@@ -38,18 +56,74 @@ outgoing:
   pool_maxsize: 20
   proxies:
     all://:
-      - socks5h://tor1:9050
-      - socks5h://tor2:9050
-      - socks5h://tor3:9050
-      - socks5h://tor4:9050
-      - socks5h://tor5:9050
-      - socks5h://tor6:9050
+      - socks5h://tor1:9150
+      - socks5h://tor2:9150
+      - socks5h://tor3:9150
+      - socks5h://tor4:9150
+      - socks5h://tor5:9150
+      - socks5h://tor6:9150
+      - socks5h://tor7:9150
+      - socks5h://tor8:9150
+      - socks5h://tor9:9150
+      - socks5h://tor10:9150
+      - socks5h://tor11:9150
+      - socks5h://tor12:9150
+      - socks5h://tor13:9150
+      - socks5h://tor14:9150
+      - socks5h://tor15:9150
+      - socks5h://tor16:9150
 
 engines:
+  # --- General web (kept) ---
   - {name: google, engine: google, disabled: false, shortcut: g}
   - {name: bing, engine: bing, disabled: false, shortcut: bi}
   - {name: brave, engine: brave, disabled: false, shortcut: br}
   - {name: startpage, engine: startpage, disabled: false, shortcut: sp}
   - {name: qwant, engine: qwant, disabled: false, shortcut: qw}
   - {name: mojeek, engine: mojeek, disabled: false, shortcut: mj}
-  - {name: wikipedia, engine: wikipedia, disabled: false, shortcut: wp}
+
+  # ── DIRECT-EGRESS BACKBONE (network: {proxies: null}) ──────────────────────────
+  # These engines hit their OWN official/public APIs (or own index), which do NOT
+  # IP-block this server — so routing them through Tor only ADDS latency/failure
+  # (a slow Tor exit starves even them, which is what made deep_lookup intermittently
+  # return INSUFFICIENT_EVIDENCE). `network: {proxies: null}` OVERRIDES the global
+  # outgoing.proxies (verified in searx/network/network.py: per-engine network params
+  # override default_params), so these go DIRECT and form a RELIABLE always-on backbone.
+  # The general-web SCRAPERS above (google/bing/brave/startpage/qwant/mojeek) stay on
+  # Tor — they DO block the datacenter IP.
+
+  # --- Wikimedia: display_type [infobox, list] forces url-bearing list results into
+  #     the JSON `results` array (default [infobox] has no url, which Dana never reads). ---
+  - {name: wikipedia, engine: wikipedia, disabled: false, shortcut: wp, display_type: [infobox, list], network: {proxies: null}}
+  - {name: wikidata,  engine: wikidata,  disabled: false, shortcut: wd, display_type: [infobox, list], network: {proxies: null}}
+
+  # --- Keyless OWN-API engines: `general` so they run for Dana's category-less JSON
+  #     queries; native category kept; enabled; DIRECT egress (no Tor). ---
+  - {name: arxiv,             engine: arxiv,           disabled: false, shortcut: arx, categories: [general, science], network: {proxies: null}}
+  - {name: openalex,          engine: openalex,        disabled: false, shortcut: oa,  categories: [general, science], network: {proxies: null}}
+  - {name: crossref,          engine: crossref,        disabled: false, shortcut: cr,  categories: [general, science], network: {proxies: null}}
+  - {name: pubmed,            engine: pubmed,          disabled: false, shortcut: pub, categories: [general, science], network: {proxies: null}}
+  - {name: semantic scholar,  engine: semantic_scholar, disabled: false, shortcut: se, categories: [general, science], network: {proxies: null}}
+  - {name: hackernews,        engine: hackernews,      disabled: false, shortcut: hn,  categories: [general, it], network: {proxies: null}}
+  - {name: stackoverflow,     engine: stackexchange,   disabled: false, shortcut: st,  api_site: 'stackoverflow', categories: [general, it, q&a], network: {proxies: null}}
+  # Reddit blocks BOTH datacenter IPs and many Tor exits — keep it on Tor (default), bonus only.
+  - {name: reddit,            engine: reddit,          disabled: false, shortcut: re,  categories: [general, social media]}
+
+  # P5: mwmbl is an INDEPENDENT engine with its OWN distributed crawler + index
+  # (~500M URLs, api.mwmbl.org) — keyless (require_api_key=False) and NOT a
+  # Google/Bing scraper, so it is immune to the per-IP blocking that hobbles the
+  # scraping engines above. Coverage is thin/rough, but Dana's relevance floor
+  # (rerank_results) drops junk, so it can only ADD signal. Zero infra, no key.
+  # DIRECT egress — api.mwmbl.org doesn't IP-block us, so skip Tor's latency/failure.
+  - {name: mwmbl, engine: mwmbl, disabled: false, shortcut: mwm, network: {proxies: null}}
+  # P5 NOT enabled — kept here only to document the decision:
+  #  * marginalia: SearXNG's built-in engine REQUIRES an api_key (init() returns
+  #    False without one). Marginalia's free "public" token is rejected by the
+  #    engine (and only survives via a missing-return bug) and is heavily rate
+  #    limited. It is a KEYED API — violates Dana's no-key constraint. Do not add.
+  #  * yacy: keyless, but the public instance (yacy.searchlab.eu) is a shared 3rd
+  #    party with thin/noisy coverage, and self-hosting returns nothing until it
+  #    has crawled for days/weeks (high cost). Deferred. To try the public
+  #    instance with no infra, uncomment and add `yacy` to keep_only above:
+  # - {name: yacy, engine: yacy, disabled: false, shortcut: ya, search_type: text,
+  #    search_mode: global, base_url: [https://yacy.searchlab.eu], timeout: 8.0}
