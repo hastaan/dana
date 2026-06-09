@@ -9,6 +9,7 @@ import "./index.css"
 
 const TopicView = lazy(() => import("./pages/TopicView").then(module => ({ default: module.TopicView })))
 const SettingsPage = lazy(() => import("./pages/Settings").then(module => ({ default: module.SettingsPage })))
+const ResearchPage = lazy(() => import("./pages/ResearchPage").then(module => ({ default: module.ResearchPage })))
 
 function LoadingFallback() {
   return <div className="flex min-h-[40vh] items-center justify-center text-sm text-muted-foreground">Loading…</div>
@@ -34,6 +35,7 @@ createRoot(document.getElementById("root")!).render(
           <Routes>
             <Route element={<AppShell />}>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/research" element={<Suspense fallback={<LoadingFallback />}><ResearchPage /></Suspense>} />
               <Route path="/topic/:id" element={<Suspense fallback={<LoadingFallback />}><TopicView /></Suspense>} />
               <Route path="/settings" element={<Suspense fallback={<LoadingFallback />}><SettingsPage /></Suspense>} />
               <Route path="/settings/:tab" element={<Suspense fallback={<LoadingFallback />}><SettingsPage /></Suspense>} />

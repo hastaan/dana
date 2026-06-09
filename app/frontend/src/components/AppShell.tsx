@@ -1,4 +1,4 @@
-import { ChevronRight, Settings } from "lucide-react"
+import { ChevronRight, Settings, Telescope } from "lucide-react"
 import { Link, NavLink, Outlet, useLocation, useParams } from "react-router-dom"
 import { ThemeToggle } from "./theme-toggle"
 import { useTopicsStore } from "../stores/topicsStore"
@@ -34,7 +34,10 @@ export function AppShell() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
-          <NavLink to="/settings" className={({ isActive }) => cn("inline-flex h-8 w-8 items-center justify-center rounded-md border border-border transition-colors hover:bg-accent", isActive && "bg-accent text-accent-foreground")}>
+          <NavLink to="/research" title="Research" className={({ isActive }) => cn("inline-flex h-8 w-8 items-center justify-center rounded-md border border-border transition-colors hover:bg-accent", isActive && "bg-accent text-accent-foreground")}>
+            <Telescope className="size-4" />
+          </NavLink>
+          <NavLink to="/settings" title="Settings" className={({ isActive }) => cn("inline-flex h-8 w-8 items-center justify-center rounded-md border border-border transition-colors hover:bg-accent", isActive && "bg-accent text-accent-foreground")}>
             <Settings className="size-4" />
           </NavLink>
           <ThemeToggle />
@@ -53,6 +56,9 @@ function buildBreadcrumbs(pathname: string, topicTitle?: string, params?: Record
   } else if (pathname.startsWith("/topic/") && params?.id) {
     crumbs.push({ label: "Dashboard", path: "/" })
     crumbs.push({ label: topicTitle || params.id, path: `/topic/${params.id}` })
+  } else if (pathname.startsWith("/research")) {
+    crumbs.push({ label: "Dashboard", path: "/" })
+    crumbs.push({ label: "Research", path: "/research" })
   } else if (pathname.startsWith("/settings")) {
     crumbs.push({ label: "Dashboard", path: "/" })
     crumbs.push({ label: "Settings", path: "/settings" })

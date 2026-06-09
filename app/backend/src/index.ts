@@ -16,6 +16,7 @@ import { promptsRouter } from "./routes/prompts"
 import { providersRouter } from "./routes/providers"
 import { customProvidersRouter } from "./routes/customProviders"
 import { calibrationRouter } from "./routes/calibration"
+import { researchRouter } from "./routes/research"
 import { seedDefaults } from "./db/queries/promptConfigs"
 import { seedDemoTopic } from "./db/seedDemo"
 import { fetchAvailableModels } from "./llm/proxyClient"
@@ -73,6 +74,7 @@ const app = new Elysia()
   .use(providersRouter)
   .use(customProvidersRouter)
   .use(calibrationRouter)
+  .use(researchRouter)
   .get("/health", () => ({ status: "ok" }))
   .get("/api/health", () => ({ status: "ok" }))
   .get("/api/models", async () => {
