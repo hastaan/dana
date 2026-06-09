@@ -87,10 +87,17 @@ def rerank_results(query: str, results: list[dict], lang: str | None = None) -> 
     bias = (lang or "").strip().lower() or None
 
     if len(qterms) >= 2:
-        def _overlaps(res: dict) -> bool:
-            return bool(qterms & (_terms(res.get("title") or "") | _terms(res.get("snippet") or "")))
-        on_topic = [r for r in results if _overlaps(r)]
-        results = on_topic  # all-junk → [] (honest empty, not nonsense)
+        # Scale the bar with query length: a long, specific query that shares only ONE token
+        # with a result is usually an acronym/name collision (e.g. "MEK NCRI Maryam Rajavi…"
+        # matching a "Methyl Ethyl Ketone" page on "mek" alone, or "Reza Pahlavi…" matching a
+        # company called "REZA" on "reza"), so require ≥2 overlapping terms once the query has
+        # ≥4 content terms. Short queries keep the ≥1 bar (sparser signal). All-junk → [].
+        min_overlap = 2 if len(qterms) >= 4 else 1
+
+        def _overlap_count(res: dict) -> int:
+            return len(qterms & (_terms(res.get("title") or "") | _terms(res.get("snippet") or "")))
+
+        results = [r for r in results if _overlap_count(r) >= min_overlap]
         if not results:
             return []
 

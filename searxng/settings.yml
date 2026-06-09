@@ -27,6 +27,21 @@ server:
   limiter: false
   secret_key: "4ced9d1ff16fbce79a94aea9c729277b6f755f02c68fd973"
 
+# Route every engine request through Tor so search engines see rotating Tor exit IPs
+# instead of this server's (blocked) datacenter IP. The `tor` service (dperson/torproxy)
+# exposes SOCKS5 on :9050; socks5h:// resolves DNS through Tor too. Tor circuits are slow,
+# so timeouts are raised. If `tor` is down, SearXNG simply can't reach engines (honest empty).
+outgoing:
+  request_timeout: 12.0
+  max_request_timeout: 20.0
+  pool_connections: 100
+  pool_maxsize: 20
+  proxies:
+    all://:
+      - socks5h://tor1:9050
+      - socks5h://tor2:9050
+      - socks5h://tor3:9050
+
 engines:
   - {name: google, engine: google, disabled: false, shortcut: g}
   - {name: bing, engine: bing, disabled: false, shortcut: bi}

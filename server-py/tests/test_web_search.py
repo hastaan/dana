@@ -39,6 +39,22 @@ class TestRelevanceFloor:
     def test_empty_in_empty_out(self):
         assert rerank_results("Iranian regime collapse", []) == []
 
+    def test_long_query_requires_two_term_overlap(self):
+        # ≥4-term query: a single-token collision (acronym/name) is dropped; a multi-term
+        # match is kept. Guards the "MEK chemical" / "REZA company" false positives.
+        results = [
+            _r("Methyl Ethyl Ketone (MEK) — solvent", "industrial chemicals", url="https://chem"),
+            _r("MEK / NCRI under Maryam Rajavi", "Iranian opposition coalition", url="https://iran"),
+        ]
+        out = rerank_results("MEK NCRI Maryam Rajavi ethnic autonomists", results)
+        urls = [r["url"] for r in out]
+        assert "https://iran" in urls and "https://chem" not in urls
+
+    def test_two_term_query_keeps_single_overlap(self):
+        # <4-term query keeps the ≥1 bar (sparser signal), so a single strong match survives.
+        results = [_r("Iran analysis", "regime outlook", url="https://a")]
+        assert len(rerank_results("Iran regime", results)) == 1
+
     def test_title_overlap_ranks_above_snippet_only(self):
         results = [
             _r("Generic page", "mentions regime collapse in passing", url="https://a"),
