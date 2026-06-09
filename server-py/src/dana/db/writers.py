@@ -54,6 +54,53 @@ def set_topic_status(topic_id: str, status: str) -> None:
         c.execute("UPDATE topics SET status=?, updated_at=? WHERE id=?", (status, ISO(), topic_id))
 
 
+# ── Deletes (card actions: DELETE /topics/:id, …/parties/:id, …/clues/:id) ──────
+# Every topic-scoped table carries a `topic_id`. Not all declare ON DELETE CASCADE
+# (forum_rounds/scratchpads/supervisor_state/synthesis_cache don't), so we wipe each
+# explicitly with FK enforcement OFF — child-table order then can't trip a restrict/
+# cascade ordering error, and no rows are orphaned.
+_TOPIC_CHILD_TABLES = (
+    "clue_versions", "clues", "parties", "states", "representatives",
+    "forum_turns", "forum_rounds", "forum_scenarios", "forum_scenario_summaries",
+    "forum_scratchpads", "forum_supervisor_state", "forum_sessions",
+    "expert_assessments", "final_verdicts", "expert_councils",
+    "research_searches", "research_pages", "forecast_resolutions", "synthesis_cache",
+)
+
+
+def delete_topic(topic_id: str) -> bool:
+    """Delete a topic and ALL its data. Returns False if the topic didn't exist."""
+    with connect() as c:
+        c.execute("PRAGMA foreign_keys=OFF")  # before any DML; explicit full wipe below
+        existed = c.execute("SELECT 1 FROM topics WHERE id=?", (topic_id,)).fetchone() is not None
+        for tbl in _TOPIC_CHILD_TABLES:
+            c.execute(f"DELETE FROM {tbl} WHERE topic_id=?", (topic_id,))
+        c.execute("DELETE FROM topics WHERE id=?", (topic_id,))
+        return existed
+
+
+def delete_party(topic_id: str, party_id: str) -> bool:
+    """Delete one party. Also removes its representatives so nothing dangles."""
+    with connect() as c:
+        existed = c.execute(
+            "SELECT 1 FROM parties WHERE id=? AND topic_id=?", (party_id, topic_id)
+        ).fetchone() is not None
+        c.execute("DELETE FROM representatives WHERE topic_id=? AND party_id=?", (topic_id, party_id))
+        c.execute("DELETE FROM parties WHERE id=? AND topic_id=?", (party_id, topic_id))
+        return existed
+
+
+def delete_clue(topic_id: str, clue_id: str) -> bool:
+    """Delete one clue and all its versions."""
+    with connect() as c:
+        existed = c.execute(
+            "SELECT 1 FROM clues WHERE id=? AND topic_id=?", (clue_id, topic_id)
+        ).fetchone() is not None
+        c.execute("DELETE FROM clue_versions WHERE clue_id=? AND topic_id=?", (clue_id, topic_id))
+        c.execute("DELETE FROM clues WHERE id=? AND topic_id=?", (clue_id, topic_id))
+        return existed
+
+
 # ── Parties ───────────────────────────────────────────────────────────────────
 def set_parties(topic_id: str, parties: list[dict]) -> None:
     """Replace the topic's parties (⇄ dbSetParties)."""

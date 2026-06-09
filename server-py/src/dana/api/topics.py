@@ -33,14 +33,35 @@ async def get_topic(topic_id: str):
     return topic
 
 
+@router.delete("/api/topics/{topic_id}")
+async def delete_topic(topic_id: str):
+    """Delete a topic and all its data (Dashboard TopicCard delete)."""
+    await asyncio.to_thread(writers.delete_topic, topic_id)
+    return {"success": True}
+
+
 @router.get("/api/topics/{topic_id}/parties")
 async def get_parties(topic_id: str):
     return await reads.list_parties(topic_id)
 
 
+@router.delete("/api/topics/{topic_id}/parties/{party_id}")
+async def delete_party(topic_id: str, party_id: str):
+    """Delete one party (PartiesPanel card delete)."""
+    await asyncio.to_thread(writers.delete_party, topic_id, party_id)
+    return {"success": True}
+
+
 @router.get("/api/topics/{topic_id}/clues")
 async def get_clues(topic_id: str):
     return await reads.list_clues_api(topic_id)
+
+
+@router.delete("/api/topics/{topic_id}/clues/{clue_id}")
+async def delete_clue(topic_id: str, clue_id: str):
+    """Delete one clue and its versions (CluesPanel card delete)."""
+    await asyncio.to_thread(writers.delete_clue, topic_id, clue_id)
+    return {"success": True}
 
 
 # ── Verdict / expert council (⇄ TS expertCouncil.ts) ───────────────────────────
