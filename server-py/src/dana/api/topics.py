@@ -1,12 +1,15 @@
 import asyncio
 import json
 
+import dspy
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ..agents import party_intel
 from ..db import reads
 from ..db import topics as topics_repo
 from ..db import writers
+from ..llm import dspy_lm
 
 router = APIRouter()
 
@@ -26,6 +29,33 @@ class AnalystGuidance(BaseModel):
 
 class SteeringBody(BaseModel):
     steering: AnalystGuidance | None = None
+
+
+# ── Party-management request bodies (⇄ frontend api/client.ts parties.*) ───────────
+class PartyBody(BaseModel):
+    model_config = {"extra": "allow"}  # accept arbitrary partial-Party fields (frontend sends Record<string,unknown>)
+
+
+class MergeBody(BaseModel):
+    source_ids: list[str]
+    target: dict = {}
+
+
+class SmartAddBody(BaseModel):
+    name: str
+
+
+class SmartEditBody(BaseModel):
+    feedback: str
+
+
+class SplitInto(BaseModel):
+    name: str
+
+
+class SplitBody(BaseModel):
+    source_id: str
+    into: list[SplitInto] = []
 
 
 def _topic_settings(topic: dict) -> dict:
@@ -97,6 +127,228 @@ async def delete_party(topic_id: str, party_id: str):
     """Delete one party (PartiesPanel card delete)."""
     await asyncio.to_thread(writers.delete_party, topic_id, party_id)
     return {"success": True}
+
+
+# ── Party management (⇄ deleted TS routes/parties.ts + agents/PartyIntelligence.ts) ──
+# Every route resolves the topic first (404 if missing). DSPy/DB work runs in asyncio.to_thread
+# under dspy_lm.lm_context() (matching pipeline/discovery.py). Each returned party dict carries
+# the full reads.list_parties key set so the frontend round-trips it unchanged.
+async def _require_topic(topic_id: str) -> dict:
+    topic = await topics_repo.get_topic(topic_id)
+    if topic is None:
+        raise HTTPException(status_code=404, detail={"message": "Topic not found"})
+    return topic
+
+
+def _dedup_union(sources: list[dict], key: str, sub: str | None = None) -> list[str]:
+    """Order-preserving union of a list-valued field (or circle sub-list) across source parties."""
+    out: list[str] = []
+    for s in sources:
+        vals = (s.get(key) or {}).get(sub) if sub else s.get(key)
+        for v in (vals or []):
+            if v not in out:
+                out.append(v)
+    return out
+
+
+@router.put("/api/topics/{topic_id}/parties/{party_id}")
+async def update_party(topic_id: str, party_id: str, body: PartyBody):
+    """Update one party in place (PartiesPanel inline edit / save). NO LLM: merges the partial
+    body over the existing party and recomputes weight as the mean of weight_factors."""
+    await _require_topic(topic_id)
+    existing = await asyncio.to_thread(writers.get_party, topic_id, party_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail={"message": "Party not found"})
+    patch = body.model_dump()
+    merged = {**existing, **patch, "id": existing["id"]}
+    merged["weight"] = party_intel.recompute_weight(merged.get("weight_factors", {}))
+    await asyncio.to_thread(writers.upsert_party, topic_id, merged)
+    return merged
+
+
+@router.post("/api/topics/{topic_id}/parties")
+async def add_party(topic_id: str, body: PartyBody):
+    """Add a party (PartiesPanel manual add). Builds a party from the body defaults, then runs a
+    single non-search AssessWeights rescore so it lands with real weight/factors + circle keys."""
+    topic = await _require_topic(topic_id)
+    b = body.model_dump()
+    name = (b.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"message": "name is required"})
+    pid = b.get("id") or await asyncio.to_thread(writers.unique_party_id, topic_id, name)
+    party = {
+        **b,
+        "id": pid, "name": name, "type": b.get("type", "non_state"),
+        "description": b.get("description", ""), "agenda": b.get("agenda", ""),
+        "means": b.get("means", []),
+        "circle": b.get("circle", {"visible": [], "shadow": []}),
+        "stance": b.get("stance", "passive"), "vulnerabilities": b.get("vulnerabilities", []),
+        "weight_factors": b.get("weight_factors", {}), "weight": 0, "weight_evidence": {},
+        "auto_discovered": False, "user_verified": True,
+    }
+
+    def _work():
+        with dspy_lm.lm_context():
+            return party_intel.rescore_party(topic["title"], topic["description"], party)
+
+    scored = await asyncio.to_thread(_work)
+    await asyncio.to_thread(writers.upsert_party, topic_id, scored)
+    return scored
+
+
+@router.post("/api/topics/{topic_id}/parties/merge")
+async def merge_parties(topic_id: str, body: MergeBody):
+    """Merge >=2 parties into one (PartiesPanel merge — the user's chief complaint). Deterministic
+    union of circle/means/vulnerabilities/agenda is the reliable primary path (no LLM); the merged
+    party is rescored, the sources deleted, and the merged party persisted."""
+    topic = await _require_topic(topic_id)
+    if len(body.source_ids) < 2:
+        raise HTTPException(status_code=400, detail={"message": "Need at least 2 source_ids to merge"})
+    target = body.target or {}
+    tname = (target.get("name") or "").strip()
+    if not tname:
+        raise HTTPException(status_code=400, detail={"message": "target.name is required"})
+    sources = []
+    for sid in body.source_ids:
+        s = await asyncio.to_thread(writers.get_party, topic_id, sid)
+        if s is not None:
+            sources.append(s)
+    if len(sources) < 2:
+        raise HTTPException(status_code=400, detail={"message": "Not enough matching source parties"})
+    target_id = target.get("id") or writers.slugify(tname)
+    merged = {
+        "id": target_id, "name": tname,
+        "type": target.get("type") or sources[0]["type"],
+        "description": " ".join(s.get("description", "") for s in sources).strip(),
+        "agenda": "; ".join(a for s in sources if (a := s.get("agenda"))),
+        "means": _dedup_union(sources, "means"),
+        "circle": {
+            "visible": _dedup_union(sources, "circle", "visible"),
+            "shadow": _dedup_union(sources, "circle", "shadow"),
+        },
+        "stance": sources[0].get("stance", "active"),
+        "vulnerabilities": _dedup_union(sources, "vulnerabilities"),
+        "weight_factors": sources[0].get("weight_factors", {}), "weight": 0, "weight_evidence": {},
+        "auto_discovered": False, "user_verified": True,
+    }
+
+    def _work():
+        with dspy_lm.lm_context():
+            return party_intel.rescore_party(topic["title"], topic["description"], merged)
+
+    scored = await asyncio.to_thread(_work)
+    scored["id"] = target_id  # re-force id after rescore (TS parity)
+    # Delete every source THEN upsert merged — a source id may equal target_id when re-merging in
+    # place, so delete first and upsert last.
+    for sid in body.source_ids:
+        if sid != target_id:
+            await asyncio.to_thread(writers.delete_party, topic_id, sid)
+    await asyncio.to_thread(writers.upsert_party, topic_id, scored)
+    return scored
+
+
+@router.post("/api/topics/{topic_id}/parties/smart-add")
+async def smart_add_party(topic_id: str, body: SmartAddBody):
+    """LLM-profile a party from just a name (PartiesPanel smart add), then rescore + persist."""
+    topic = await _require_topic(topic_id)
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"message": "name is required"})
+    existing = await reads.list_parties(topic_id)
+    existing_names = ", ".join(p["name"] for p in existing)
+
+    def _work():
+        with dspy_lm.lm_context():
+            prof = dspy.ChainOfThought(party_intel.SmartAddParty)(
+                topic=topic["title"], description=topic["description"],
+                party_name=name, existing_names=existing_names,
+            ).profile
+            party = prof.model_dump()
+            party.update(
+                id=writers.unique_party_id(topic_id, name), name=party.get("name") or name,
+                weight=0, weight_factors={}, weight_evidence={},
+                auto_discovered=False, user_verified=True,
+            )
+            return party_intel.rescore_party(topic["title"], topic["description"], party)
+
+    try:
+        scored = await asyncio.to_thread(_work)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail={"message": f"Smart add failed: {e}"})
+    await asyncio.to_thread(writers.upsert_party, topic_id, scored)
+    return scored
+
+
+@router.post("/api/topics/{topic_id}/parties/{party_id}/smart-edit")
+async def smart_edit_party(topic_id: str, party_id: str, body: SmartEditBody):
+    """LLM-edit a party from feedback (PartiesPanel smart edit), then rescore + persist."""
+    topic = await _require_topic(topic_id)
+    fb = body.feedback.strip()
+    if not fb:
+        raise HTTPException(status_code=400, detail={"message": "feedback is required"})
+    current = await asyncio.to_thread(writers.get_party, topic_id, party_id)
+    if current is None:
+        raise HTTPException(status_code=404, detail={"message": "Party not found"})
+
+    def _work():
+        with dspy_lm.lm_context():
+            prof = dspy.ChainOfThought(party_intel.SmartEditParty)(
+                topic=topic["title"], current_party=json.dumps(current), feedback=fb,
+            ).profile
+            edited = {**current, **prof.model_dump(), "id": current["id"],
+                      "auto_discovered": False, "user_verified": True}
+            return party_intel.rescore_party(topic["title"], topic["description"], edited)
+
+    try:
+        scored = await asyncio.to_thread(_work)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail={"message": f"Smart edit failed: {e}"})
+    scored["id"] = current["id"]
+    await asyncio.to_thread(writers.upsert_party, topic_id, scored)
+    return scored
+
+
+@router.post("/api/topics/{topic_id}/parties/split")
+async def split_party(topic_id: str, body: SplitBody):
+    """Split one party into >=2 named sub-parties (PartiesPanel split). LLM distributes attributes;
+    each sub-party is rescored. The source is removed and the new parties persisted."""
+    topic = await _require_topic(topic_id)
+    if not body.source_id:
+        raise HTTPException(status_code=400, detail={"message": "source_id is required"})
+    names = [i.name for i in body.into if i.name.strip()]
+    if len(names) < 2:
+        raise HTTPException(status_code=400, detail={"message": "Need at least 2 target names"})
+    source = await asyncio.to_thread(writers.get_party, topic_id, body.source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail={"message": "Party not found"})
+
+    def _work():
+        with dspy_lm.lm_context():
+            profs = dspy.ChainOfThought(party_intel.SmartSplitParty)(
+                topic=topic["title"], source_party=json.dumps(source), into_names=names,
+            ).parties or []
+            created = []
+            used: set[str] = set()  # local id-dedup within this split batch
+            for i, nm in enumerate(names):
+                prof = profs[i].model_dump() if i < len(profs) else {"name": nm}
+                pid = writers.unique_party_id(topic_id, prof.get("name") or nm)
+                while pid in used:
+                    pid = pid + "-x"
+                used.add(pid)
+                party = {**prof, "id": pid, "name": prof.get("name") or nm,
+                         "weight": 0, "weight_factors": {}, "weight_evidence": {},
+                         "auto_discovered": False, "user_verified": True}
+                created.append(party_intel.rescore_party(topic["title"], topic["description"], party))
+            return created
+
+    try:
+        created = await asyncio.to_thread(_work)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail={"message": f"Split failed: {e}"})
+    await asyncio.to_thread(writers.delete_party, topic_id, body.source_id)
+    for p in created:
+        await asyncio.to_thread(writers.upsert_party, topic_id, p)
+    return {"removed": body.source_id, "created": created}
 
 
 @router.get("/api/topics/{topic_id}/clues")

@@ -333,6 +333,24 @@ class StormResearchEngine:
                 p['means'] = list(dict.fromkeys(w.means))
             if w.vulnerabilities:
                 p['vulnerabilities'] = list(dict.fromkeys(w.vulnerabilities))
+            # Populate circle for EVERY party (TS filled circle at profiling time; server-py only
+            # had it for alliances). For an alliance, MERGE the scorer's circle_visible with the
+            # existing member-name visible list (don't lose the roster); for others, take the
+            # scorer's circle. getattr defaults keep this safe even before PartyWeight grows the
+            # circle fields.
+            cur = p.get('circle') or {'visible': [], 'shadow': []}
+            vis = getattr(w, 'circle_visible', None) or []
+            sha = getattr(w, 'circle_shadow', None) or []
+            if p.get('type') == 'alliance':
+                p['circle'] = {
+                    'visible': list(dict.fromkeys((cur.get('visible') or []) + vis)),
+                    'shadow': list(dict.fromkeys((cur.get('shadow') or []) + sha)),
+                }
+            else:
+                p['circle'] = {
+                    'visible': list(dict.fromkeys(vis)) or list(cur.get('visible') or []),
+                    'shadow': list(dict.fromkeys(sha)) or list(cur.get('shadow') or []),
+                }
             emit({'type': 'think', 'icon': '⚖', 'label': f"Scored · {p['name']}", 'detail': f"weight {p['weight']}"})
 
         # FLOOR — any party the scorer skipped gets a low non-zero baseline so the UI never shows

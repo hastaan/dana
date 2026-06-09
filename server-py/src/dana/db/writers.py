@@ -141,6 +141,65 @@ def update_party_weight(topic_id: str, party_id: str, weight: float,
         )
 
 
+def upsert_party(topic_id: str, party: dict) -> None:
+    """Insert-or-replace ONE party (single-row analogue of set_parties; PK is (id,topic_id)).
+    Used by the party-management routes (add/update/merge/split/smart-*). Column list + JSON
+    encoding are identical to set_parties so the row round-trips with reads.list_parties."""
+    pid = party.get("id") or slugify(party.get("name", "x"))
+    with connect() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO parties (id,topic_id,name,type,description,weight,weight_factors,"
+            "weight_evidence,agenda,means,circle,stance,vulnerabilities,auto_discovered,user_verified)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                pid, topic_id, party["name"], party.get("type", "non_state"),
+                party.get("description", ""), party.get("weight", 0),
+                json.dumps(party.get("weight_factors", {})), json.dumps(party.get("weight_evidence", {})),
+                party.get("agenda", ""), json.dumps(party.get("means", [])),
+                json.dumps(party.get("circle", {"visible": [], "shadow": []})),
+                party.get("stance", "active"), json.dumps(party.get("vulnerabilities", [])),
+                1 if party.get("auto_discovered", False) else 0,
+                1 if party.get("user_verified", True) else 0,
+            ),
+        )
+
+
+def get_party(topic_id: str, party_id: str) -> dict | None:
+    """Sync single-party read shaped exactly like reads.list_parties (callable from a worker
+    thread). Returns None when the party is absent."""
+    with connect() as c:
+        r = c.execute(
+            "SELECT * FROM parties WHERE id=? AND topic_id=?", (party_id, topic_id)
+        ).fetchone()
+    if r is None:
+        return None
+    return {
+        "id": r["id"], "name": r["name"], "type": r["type"], "description": r["description"],
+        "weight": r["weight"], "agenda": r["agenda"], "stance": r["stance"],
+        "means": json.loads(r["means"] or "[]"),
+        "weight_factors": json.loads(r["weight_factors"] or "{}"),
+        "weight_evidence": json.loads(r["weight_evidence"] or "{}"),
+        "circle": json.loads(r["circle"] or '{"visible": [], "shadow": []}'),
+        "vulnerabilities": json.loads(r["vulnerabilities"] or "[]"),
+        "auto_discovered": bool(r["auto_discovered"]), "user_verified": bool(r["user_verified"]),
+    }
+
+
+def unique_party_id(topic_id: str, name: str) -> str:
+    """slugify(name), suffixed -2/-3… if that id already exists for this topic, so a new
+    party never silently overwrites an unrelated row (slugify truncates to 30 → collisions)."""
+    base = slugify(name)
+    with connect() as c:
+        existing = {row[0] for row in c.execute(
+            "SELECT id FROM parties WHERE topic_id=?", (topic_id,)
+        ).fetchall()}
+    pid, n = base, 2
+    while pid in existing:
+        pid = f"{base}-{n}"
+        n += 1
+    return pid
+
+
 def save_representatives(topic_id: str, reps: list[dict]) -> None:
     """Replace the topic's representatives (⇄ dbSaveRepresentatives)."""
     with connect() as c:

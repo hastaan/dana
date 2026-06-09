@@ -29,6 +29,8 @@ class PartyWeight(BaseModel):
     justification: str = Field(default="", description="1 sentence on the dominant factors")
     means: list[str] = Field(default_factory=list, description="specific levers of power / real capabilities this party has, grounded in the evidence")
     vulnerabilities: list[str] = Field(default_factory=list, description="specific weak points / constraints from the evidence")
+    circle_visible: list[str] = Field(default_factory=list, description="known PUBLIC allies / key figures / institutions backing this party, each with brief context")
+    circle_shadow: list[str] = Field(default_factory=list, description="inferred or COVERT backers / proxies / sponsors of this party, each with brief context")
 
 
 class RepDraft(BaseModel):
@@ -44,6 +46,9 @@ class AssessWeights(dspy.Signature):
     party also list its `means` (specific levers of power / real capabilities named in the
     evidence) and `vulnerabilities` (specific weak points / constraints from the evidence);
     do NOT invent capabilities the evidence does not support. One-sentence justification each.
+    Also map each party's `circle`: circle_visible = its known public allies/key figures/
+    institutions; circle_shadow = inferred or covert backers/proxies/sponsors (brief context
+    each, grounded in the evidence; leave empty rather than invent).
 
     For a party of type='alliance' (its members are listed after 'members:' in the parties
     input): score the COMBINED capability of all listed members on each axis (combined military
