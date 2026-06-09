@@ -47,7 +47,13 @@ class SeedPerspectives(dspy.Signature):
     """Given the scenario and analogous cases, produce the ADVERSARIAL party set and the
     cross-cutting analytical lenses for forecasting. Parties are real actors with
     conflicting agendas; lenses are frames (economic, military, info/legitimacy, external
-    backing). Also give a short research outline: the top-level coverage sections."""
+    backing). Also give a short research outline: the top-level coverage sections.
+
+    When several actors compete to lead, succeed, or replace a regime, distinguish rival
+    opposition/successor factions that cannot coalesce: keep mutually-hostile currents as
+    separate parties rather than merging or scattering them, and weight factions by
+    realistic domestic popular support, not organizational visibility or diaspora-media
+    presence."""
 
     topic: str = dspy.InputField()
     description: str = dspy.InputField()
