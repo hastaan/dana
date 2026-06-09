@@ -1,46 +1,43 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test"
 import { buildAgentContext, estimateTokens, serializeContext } from "../src/agents/contextBuilder"
+import { resetDb, seedTopic, seedClues, seedParties, makeClue, makeClueVersion } from "./setup"
 import { mkdir, rm } from "fs/promises"
 import { join } from "path"
 
 const TEST_DATA_DIR = "/tmp/dana-context-test"
 const TOPIC_ID = "ctx-test-topic"
 
-// Generate 30 mock clues to test token budget
+// Generate 30 mock clues to test token budget. Stored in SQLite now (not clues.json).
 function makeMockClues(n: number) {
-  return Array.from({ length: n }, (_, i) => ({
+  return Array.from({ length: n }, (_, i) => makeClue({
     id: `clue-${String(i + 1).padStart(3, "0")}`,
     current: 1,
     added_at: "2026-01-01T00:00:00Z",
     last_updated_at: "2026-01-01T00:00:00Z",
-    added_by: "auto",
-    status: "verified",
-    versions: [{
+    versions: [makeClueVersion({
       v: 1, date: "2026-01-01T00:00:00Z",
       title: `Clue title number ${i + 1} about some geopolitical event`,
       timeline_date: `2026-01-${String(i + 1).padStart(2, "0")}`,
       party_relevance: ["irgc"], domain_tags: ["military"], relevance_score: 70 + i,
-      raw_source: { url: `https://source${i}.com`, fetched_at: "2026-01-01T00:00:00Z" },
-      source_credibility: { score: 75, notes: "", bias_flags: [], origin_source: { url: "", outlet: "", is_republication: false } },
-      bias_corrected_summary: "A neutral summary of this event.", clue_type: "event", change_note: "Initial", key_points: []
-    }]
+      raw_source: { urls: [`https://source${i}.com`], outlets: [], fetched_at: "2026-01-01T00:00:00Z" },
+      bias_corrected_summary: "A neutral summary of this event.", change_note: "Initial",
+    })]
   }))
 }
 
 const MOCK_PARTIES = Array.from({ length: 8 }, (_, i) => ({
   id: `party-${i}`, name: `Party Name ${i}`, weight: 50 + i * 5,
-  type: "state", description: "", agenda: "", means: [], circle: { visible: [], shadow: [] },
-  stance: "active", vulnerabilities: [], auto_discovered: true, user_verified: false,
+  type: "state" as const,
   weight_factors: { military_capacity: 50, economic_control: 50, information_control: 50, international_support: 50, internal_legitimacy: 50 }
 }))
 
 beforeAll(async () => {
   process.env.DATA_DIR = TEST_DATA_DIR
   await mkdir(join(TEST_DATA_DIR, "topics", TOPIC_ID, "logs"), { recursive: true })
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "topic.json"), JSON.stringify({ current_version: 2 }))
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "clues.json"), JSON.stringify(makeMockClues(30)))
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "parties.json"), JSON.stringify(MOCK_PARTIES))
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "states.json"), JSON.stringify([]))
+  resetDb()
+  seedTopic(TOPIC_ID, { current_version: 2 })
+  seedClues(TOPIC_ID, makeMockClues(30))
+  seedParties(TOPIC_ID, MOCK_PARTIES)
 })
 
 afterAll(async () => {

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test"
 import { getPriorTurns, getScenarioList, getScenarioSummary, writeForumSession } from "../src/tools/internal/getForumData"
 import type { ForumSession } from "../src/tools/internal/getForumData"
+import { resetDb, seedTopic } from "./setup"
 import { mkdir, rm } from "fs/promises"
 import { join } from "path"
 
@@ -51,6 +52,9 @@ const MOCK_SESSION: ForumSession = {
 beforeAll(async () => {
   process.env.DATA_DIR = TEST_DATA_DIR
   await mkdir(join(TEST_DATA_DIR, "topics", TOPIC_ID), { recursive: true })
+  // forum_sessions FK to topics → seed the topic before writing the session (DB-backed now).
+  resetDb()
+  seedTopic(TOPIC_ID)
   await writeForumSession(TOPIC_ID, MOCK_SESSION)
 })
 
@@ -81,8 +85,10 @@ describe("getPriorTurns", () => {
     expect(turns).toHaveLength(0)
   })
 
-  it("throws for missing session", async () => {
-    await expect(getPriorTurns(TOPIC_ID, "nonexistent-session")).rejects.toThrow("not found")
+  // Contract change: getPriorTurns is now tolerant — a missing session returns [] (not throws),
+  // so a stale/absent session id never aborts a forum run.
+  it("returns empty array for missing session", async () => {
+    await expect(getPriorTurns(TOPIC_ID, "nonexistent-session")).resolves.toEqual([])
   })
 })
 

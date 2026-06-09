@@ -1,5 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test"
 import { createTopic, getTopic, listTopics, updateTopic, deleteTopic } from "../src/pipeline/topicManager"
+import { dbGetTopic } from "../src/db/queries/topics"
+import { dbGetParties } from "../src/db/queries/parties"
+import { dbGetClues } from "../src/db/queries/clues"
+import { dbGetRepresentatives } from "../src/db/queries/forum"
+import { resetDb } from "./setup"
 import { join } from "path"
 import { rm, mkdir } from "fs/promises"
 
@@ -10,6 +15,7 @@ process.env.DATA_DIR = TEST_DATA_DIR
 
 beforeAll(async () => {
   await mkdir(join(TEST_DATA_DIR, "topics"), { recursive: true })
+  resetDb()
 })
 
 afterAll(async () => {
@@ -19,7 +25,7 @@ afterAll(async () => {
 describe("TopicManager", () => {
   let topicId: string
 
-  it("creates a topic and writes JSON to disk", async () => {
+  it("creates a topic persisted to the DB", async () => {
     const topic = await createTopic({
       title: "Test Topic",
       description: "A test topic for unit testing",
@@ -30,11 +36,9 @@ describe("TopicManager", () => {
     expect(topic.status).toBe("draft")
     expect(topic.current_version).toBe(0)
 
-    // verify JSON written to disk
-    const file = Bun.file(join(TEST_DATA_DIR, "topics", topic.id, "topic.json"))
-    expect(await file.exists()).toBe(true)
-    const saved = await file.json()
-    expect(saved.id).toBe(topic.id)
+    // Topics persist to SQLite now (not topic.json on disk).
+    const saved = dbGetTopic(topic.id)
+    expect(saved?.id).toBe(topic.id)
   })
 
   it("reads a topic by id", async () => {
@@ -69,13 +73,12 @@ describe("TopicManager", () => {
     }
   })
 
-  it("creates empty JSON files for parties, clues, representatives, states", async () => {
-    for (const file of ["parties.json", "clues.json", "representatives.json", "states.json"]) {
-      const f = Bun.file(join(TEST_DATA_DIR, "topics", topicId, file))
-      expect(await f.exists()).toBe(true)
-      const content = await f.json()
-      expect(Array.isArray(content)).toBe(true)
-    }
+  it("starts with empty parties, clues, and representatives in the DB", async () => {
+    // parties/clues/representatives/states moved from JSON files to SQLite tables; a fresh topic
+    // simply has no rows yet.
+    expect(dbGetParties(topicId)).toEqual([])
+    expect(dbGetClues(topicId)).toEqual([])
+    expect(dbGetRepresentatives(topicId)).toEqual([])
   })
 
   it("deletes a topic", async () => {

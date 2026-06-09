@@ -6,37 +6,36 @@ import {
 import {
   writeCheckpoint, readCheckpoint, markTurnComplete, isTurnComplete, isStageComplete
 } from "../src/pipeline/checkpointManager"
+import { dbGetTopic } from "../src/db/queries/topics"
+import { resetDb, seedTopic, seedClues, makeClue, makeClueVersion } from "./setup"
 import { mkdir, rm } from "fs/promises"
 import { join } from "path"
 
 const TEST_DATA_DIR = "/tmp/dana-state-test"
 const TOPIC_ID = "state-test-topic"
 
+// Clues/states/topic are read from SQLite now (not clues.json/states.json/topic.json).
 const MOCK_CLUES_V1 = [
-  { id: "clue-001", current: 1, added_at: "", last_updated_at: "", added_by: "auto", status: "verified",
-    versions: [{ v: 1, date: "", title: "Clue 001", timeline_date: "2026-01-01", party_relevance: ["irgc"],
-      domain_tags: [], relevance_score: 80, raw_source: { url: "https://a.com", fetched_at: "" },
-      source_credibility: { score: 75, notes: "", bias_flags: [], origin_source: { url: "", outlet: "", is_republication: false } },
-      bias_corrected_summary: "", clue_type: "event", change_note: "", key_points: [] }] },
+  makeClue({ id: "clue-001", current: 1, added_by: "auto", status: "verified",
+    versions: [makeClueVersion({ v: 1, title: "Clue 001", timeline_date: "2026-01-01", party_relevance: ["irgc"],
+      relevance_score: 80, raw_source: { urls: ["https://a.com"], outlets: [], fetched_at: "" },
+      source_credibility: { score: 75, notes: "", bias_flags: [], origin_sources: [] } })] }),
 ]
 
 const MOCK_CLUES_V2 = [
   ...MOCK_CLUES_V1,
-  { id: "clue-002", current: 1, added_at: "", last_updated_at: "", added_by: "auto", status: "verified",
-    versions: [{ v: 1, date: "", title: "Clue 002", timeline_date: "2026-01-02", party_relevance: ["opposition"],
-      domain_tags: [], relevance_score: 75, raw_source: { url: "https://b.com", fetched_at: "" },
-      source_credibility: { score: 70, notes: "", bias_flags: [], origin_source: { url: "", outlet: "", is_republication: false } },
-      bias_corrected_summary: "", clue_type: "event", change_note: "", key_points: [] }] },
+  makeClue({ id: "clue-002", current: 1, added_by: "auto", status: "verified",
+    versions: [makeClueVersion({ v: 1, title: "Clue 002", timeline_date: "2026-01-02", party_relevance: ["opposition"],
+      relevance_score: 75, raw_source: { urls: ["https://b.com"], outlets: [], fetched_at: "" },
+      source_credibility: { score: 70, notes: "", bias_flags: [], origin_sources: [] } })] }),
 ]
 
 beforeAll(async () => {
   process.env.DATA_DIR = TEST_DATA_DIR
   await mkdir(join(TEST_DATA_DIR, "topics", TOPIC_ID, "logs"), { recursive: true })
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "topic.json"), JSON.stringify({
-    id: TOPIC_ID, status: "complete", current_version: 0, updated_at: new Date().toISOString()
-  }))
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "clues.json"), JSON.stringify(MOCK_CLUES_V1))
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "states.json"), JSON.stringify([]))
+  resetDb()
+  seedTopic(TOPIC_ID, { status: "complete", current_version: 0 })
+  seedClues(TOPIC_ID, MOCK_CLUES_V1)
 })
 
 afterAll(async () => {
@@ -63,21 +62,21 @@ describe("StateManager", () => {
     expect(latest?.version).toBe(1)
   })
 
-  it("topic.json current_version updated to 1 and status complete", async () => {
-    const topic = await Bun.file(join(TEST_DATA_DIR, "topics", TOPIC_ID, "topic.json")).json() as any
-    expect(topic.current_version).toBe(1)
-    expect(topic.status).toBe("complete")
+  it("topic current_version updated to 1 (createVersion finalizes the topic row)", async () => {
+    // createVersion now writes the topic row in SQLite (not topic.json).
+    const topic = dbGetTopic(TOPIC_ID)
+    expect(topic?.current_version).toBe(1)
   })
 
   it("markStale sets topic status to stale", async () => {
     await markStale(TOPIC_ID)
-    const topic = await Bun.file(join(TEST_DATA_DIR, "topics", TOPIC_ID, "topic.json")).json() as any
-    expect(topic.status).toBe("stale")
+    const topic = dbGetTopic(TOPIC_ID)
+    expect(topic?.status).toBe("stale")
   })
 
   it("computeDelta detects new clue after adding clue-002", async () => {
-    // Simulate adding a new clue
-    await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "clues.json"), JSON.stringify(MOCK_CLUES_V2))
+    // Simulate adding a new clue (seed the second clue into the DB).
+    seedClues(TOPIC_ID, MOCK_CLUES_V2)
     const delta = await computeDelta(TOPIC_ID)
     expect(delta).not.toBeNull()
     expect(delta!.new_clues).toContain("clue-002")

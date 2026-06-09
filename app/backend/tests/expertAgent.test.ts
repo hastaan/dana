@@ -2,8 +2,12 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test"
 import { join } from "path"
 import { mkdtemp, rm, mkdir } from "fs/promises"
 import { tmpdir } from "os"
+import { resetDb, seedTopic } from "./setup"
+import { writeForumSession } from "../src/tools/internal/getForumData"
+import type { ForumSession } from "../src/tools/internal/getForumData"
 
 const originalDataDir = process.env.DATA_DIR
+const TOPIC_ID = "test-topic"
 
 describe("ExpertAgent", () => {
   let testDir: string
@@ -12,41 +16,16 @@ describe("ExpertAgent", () => {
     testDir = await mkdtemp(join(tmpdir(), "dana-expert-test-"))
     process.env.DATA_DIR = testDir
 
-    const topicDir = join(testDir, "topics", "test-topic")
+    const topicDir = join(testDir, "topics", TOPIC_ID)
     await mkdir(join(topicDir, "sources", "cache"), { recursive: true })
     await mkdir(join(topicDir, "logs"), { recursive: true })
 
-    await Bun.write(join(topicDir, "topic.json"), JSON.stringify({
-      id: "test-topic", title: "Test Topic", current_version: 1,
-    }))
+    // Only the "scenario summary is readable" test touches storage; it reads the forum session
+    // from SQLite via getScenarioSummary, so seed the topic + a completed session through the DB.
+    resetDb()
+    seedTopic(TOPIC_ID, { title: "Test Topic", current_version: 1 })
 
-    await Bun.write(join(topicDir, "parties.json"), JSON.stringify([
-      { id: "party-a", name: "Party A", weight: 80, weight_factors: { military_capacity: 90, economic_control: 70, information_control: 60, international_support: 40, internal_legitimacy: 50 } },
-      { id: "party-b", name: "Party B", weight: 50, weight_factors: { military_capacity: 30, economic_control: 60, information_control: 50, international_support: 70, internal_legitimacy: 55 } },
-    ]))
-
-    await Bun.write(join(topicDir, "clues.json"), JSON.stringify([
-      {
-        id: "clue-001", current: 1, added_at: "2026-01-01T00:00:00Z", last_updated_at: "2026-01-01T00:00:00Z", added_by: "auto",
-        versions: [{
-          v: 1, date: "2026-01-01T00:00:00Z", title: "Test clue 1",
-          raw_source: { url: "https://example.com", fetched_at: "2026-01-01T00:00:00Z" },
-          source_credibility: { score: 80, notes: "good source", bias_flags: [], origin_source: { url: "https://example.com", outlet: "Example", is_republication: false } },
-          bias_corrected_summary: "This is a test clue about military readiness.",
-          relevance_score: 85, party_relevance: ["party-a"], domain_tags: ["military"],
-          timeline_date: "2026-01-01", clue_type: "event", change_note: "Initial",
-          bias_flags: [],
-        }],
-        status: "verified",
-      },
-    ]))
-
-    await Bun.write(join(topicDir, "states.json"), JSON.stringify([
-      { version: 1, forum_session_id: "forum-session-v1", verdict_id: null }
-    ]))
-
-    // Write a completed forum session with scenario_summary
-    await Bun.write(join(topicDir, "forum-session-v1.json"), JSON.stringify({
+    const session: ForumSession = {
       session_id: "forum-session-v1",
       version: 1,
       type: "full",
@@ -78,7 +57,8 @@ describe("ExpertAgent", () => {
         contested_clues: [{ clue_id: "clue-001", cited_by: ["rep-party-a", "rep-party-b"], conflict: "Different interpretations" }],
         uncontested_clues: [],
       },
-    }))
+    }
+    await writeForumSession(TOPIC_ID, session)
   })
 
   afterAll(async () => {
@@ -86,20 +66,12 @@ describe("ExpertAgent", () => {
     await rm(testDir, { recursive: true, force: true })
   })
 
-  test("generateExpertPersonas produces the right count", async () => {
-    const { generateExpertPersonas } = await import("../src/agents/ExpertAgent")
-    const experts = generateExpertPersonas("Test Topic", 4)
-    expect(experts).toHaveLength(4)
-    expect(experts[0].domain).toBe("geopolitics")
-    expect(experts[0].auto_generated).toBe(true)
-    expect(experts[0].persona_prompt).toContain("Test Topic")
-  })
+  // Removed behavior: ExpertAgent no longer exports a synchronous generateExpertPersonas() with a
+  // fixed 8-domain catalogue (geopolitics, …). Personas are now produced dynamically, so these
+  // two assertions no longer have a function to target.
+  test.skip("generateExpertPersonas produces the right count", async () => {})
 
-  test("generateExpertPersonas caps at max available domains", async () => {
-    const { generateExpertPersonas } = await import("../src/agents/ExpertAgent")
-    const experts = generateExpertPersonas("Test Topic", 100)
-    expect(experts.length).toBeLessThanOrEqual(8) // 8 default domains
-  })
+  test.skip("generateExpertPersonas caps at max available domains", async () => {})
 
   test("weight challenge resolution: ≥2 flaggers → accepted", () => {
     // Simulate the resolveWeightChallenges logic

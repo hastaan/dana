@@ -2,7 +2,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, mock } from "bun
 import { webSearch, extractDate } from "../src/tools/external/webSearch"
 import { httpFetch } from "../src/tools/external/httpFetch"
 import { timelineLookup } from "../src/tools/external/timelineLookup"
-import { scoreResult, selectBestResults, selectRecentResults } from "../src/tools/external/searchUtils"
+// NOTE: the old ../src/tools/external/searchUtils module (scoreResult/selectBestResults/
+// selectRecentResults) was removed when scoring/reranking moved into webSearch.ts (rerankResults).
+// Its dead import and the corresponding "searchUtils" describe block at the bottom were dropped.
 import { mkdir, rm, writeFile, stat } from "fs/promises"
 import { join } from "path"
 import { createHash } from "crypto"
@@ -157,7 +159,10 @@ describe("webSearch", () => {
 
   it("falls back to Brave when SearXNG is unreachable", async () => {
     const originalFetch = globalThis.fetch
+    const originalSetTimeout = globalThis.setTimeout
     process.env.SEARXNG_URL = "http://127.0.0.1:65534"
+    // Make the SearXNG retry backoff sleeps instant so this test doesn't wait ~4s.
+    globalThis.setTimeout = ((handler: TimerHandler) => originalSetTimeout(handler, 0)) as typeof setTimeout
 
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
@@ -198,6 +203,7 @@ describe("webSearch", () => {
       ])
     } finally {
       globalThis.fetch = originalFetch
+      globalThis.setTimeout = originalSetTimeout
     }
   })
 
@@ -222,9 +228,14 @@ describe("webSearch", () => {
     }
   })
 
-  it("throws descriptive error when both engines fail", async () => {
+  // Contract change: webSearch is now failure-tolerant. When SearXNG (after retries) AND the Brave
+  // fallback both fail, it degrades to [] (logs a warning) instead of throwing, so one bad search
+  // never aborts a research run. Mirrors server-py tools/web_search.py.
+  it("degrades to [] (not throw) when both engines fail", async () => {
     const originalFetch = globalThis.fetch
+    const originalSetTimeout = globalThis.setTimeout
     process.env.SEARXNG_URL = "http://127.0.0.1:65534"
+    globalThis.setTimeout = ((handler: TimerHandler) => originalSetTimeout(handler, 0)) as typeof setTimeout
 
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
@@ -235,9 +246,10 @@ describe("webSearch", () => {
     }) as typeof fetch
 
     try {
-      await expect(webSearch("Bun.js runtime", 3)).rejects.toThrow(/SearXNG error:.*Brave fallback error:/)
+      await expect(webSearch("Bun.js runtime", 3)).resolves.toEqual([])
     } finally {
       globalThis.fetch = originalFetch
+      globalThis.setTimeout = originalSetTimeout
     }
   })
 
@@ -251,24 +263,48 @@ describe("webSearch", () => {
 })
 
 describe("httpFetch", () => {
+  // Mocked Jina Reader response so the Jina-path + cache tests run offline (NO network).
+  // fetchWithJina parses JSON ({ data: { title, content } }), not raw markdown.
+  const JINA_MARKDOWN =
+    "# Example Domain\n\nThis domain is for use in documentation examples.\n\n" +
+    "[Learn more](https://iana.org/domains/example)\n"
+
+  function mockJina(): () => void {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+      if (url.startsWith("https://r.jina.ai/")) {
+        return new Response(
+          JSON.stringify({ data: { title: "Example Domain", content: JINA_MARKDOWN } }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        )
+      }
+      return originalFetch(input as RequestInfo, init)
+    }) as typeof fetch
+    return () => { globalThis.fetch = originalFetch }
+  }
+
   it("fetches markdown content via Jina Reader with preserved shape", async () => {
-    const result = await httpFetch("https://example.com", TEST_TOPIC_ID)
-    expect(result.url).toBe("https://example.com")
-    expect(result.title.length).toBeGreaterThan(0)
-    expect(result.raw_content).toContain("[Learn more](https://iana.org/domains/example)")
-    expect(result.raw_content).not.toMatch(/<[^>]+>/)
-    expect(result.cached).toBe(false)
-    expect(typeof result.fetched_at).toBe("string")
-    console.log(`Fetched title: "${result.title}", content length: ${result.raw_content.length}`)
+    const restore = mockJina()
+    try {
+      const result = await httpFetch("https://example.com")
+      expect(result.url).toBe("https://example.com")
+      expect(result.title.length).toBeGreaterThan(0)
+      expect(result.raw_content).toContain("[Learn more](https://iana.org/domains/example)")
+      expect(result.raw_content).not.toMatch(/<[^>]+>/)
+      expect(result.cached).toBe(false)
+      expect(typeof result.fetched_at).toBe("string")
+      console.log(`Fetched title: "${result.title}", content length: ${result.raw_content.length}`)
+    } finally {
+      restore()
+    }
   })
 
-  it("returns cached result on second call within TTL", async () => {
-    const result1 = await httpFetch("https://example.com", TEST_TOPIC_ID)
-    const result2 = await httpFetch("https://example.com", TEST_TOPIC_ID)
-    expect(result2.cached).toBe(true)
-    expect(result2.raw_content).toBe(result1.raw_content)
-    console.log("Cache hit confirmed")
-  })
+  // Removed behavior: httpFetch no longer caches to disk. Its signature is httpFetch(url) only
+  // (the old topicId arg + on-disk source cache were dropped), so it always returns cached:false
+  // and never writes <topic>/sources/cache/*.json. The cache TTL/corruption tests below assert
+  // that gone behavior and are skipped.
+  it.skip("returns cached result on second call within TTL", async () => {})
 
   it("falls back to readability + turndown when Jina fails", async () => {
     const originalFetch = globalThis.fetch
@@ -331,7 +367,7 @@ describe("httpFetch", () => {
         "https://www.wsj.com/world/example",
         "https://www.ft.com/content/example",
       ]) {
-        await expect(httpFetch(url, TEST_TOPIC_ID)).rejects.toThrow(/paywalled domain/)
+        await expect(httpFetch(url)).rejects.toThrow(/paywalled domain/)
       }
       expect(fetchCalls).toBe(0)
     } finally {
@@ -339,44 +375,26 @@ describe("httpFetch", () => {
     }
   })
 
-  it("re-fetches when cached entry is older than 48 hours", async () => {
-    const targetUrl = "https://example.com"
-    await httpFetch(targetUrl, TEST_TOPIC_ID)
-    const cacheFilePath = getCacheFilePath(targetUrl)
-    const cachePayload = await Bun.file(cacheFilePath).json() as Record<string, unknown>
-    cachePayload.cached_at = new Date(Date.now() - 49 * 60 * 60 * 1000).toISOString()
-    await writeFile(cacheFilePath, JSON.stringify(cachePayload, null, 2))
+  // Removed behavior (disk cache no longer exists — see note above).
+  it.skip("re-fetches when cached entry is older than 48 hours", async () => {})
 
-    const refreshed = await httpFetch(targetUrl, TEST_TOPIC_ID)
-    expect(refreshed.cached).toBe(false)
-    const refreshedCache = await Bun.file(cacheFilePath).json() as Record<string, unknown>
-    expect(new Date(String(refreshedCache.cached_at)).getTime()).toBeGreaterThan(Date.now() - 60_000)
+  it("does not write cache files (httpFetch no longer caches to disk)", async () => {
+    const restore = mockJina()
+    try {
+      const targetUrl = "https://example.com"
+      const cacheFilePath = getCacheFilePath(targetUrl)
+      await rm(cacheFilePath, { force: true })
+
+      const result = await httpFetch(targetUrl)
+      expect(result.cached).toBe(false)
+      await expect(stat(cacheFilePath)).rejects.toThrow()
+    } finally {
+      restore()
+    }
   })
 
-  it("works without topicId and does not write cache files", async () => {
-    const targetUrl = "https://example.com"
-    const cacheFilePath = getCacheFilePath(targetUrl)
-    await rm(cacheFilePath, { force: true })
-
-    const result = await httpFetch(targetUrl)
-    expect(result.cached).toBe(false)
-    await expect(stat(cacheFilePath)).rejects.toThrow()
-  })
-
-  it("re-fetches when cache file is corrupted", async () => {
-    const cacheDir = join(TEST_DATA_DIR, "topics", TEST_TOPIC_ID, "sources", "cache")
-    await rm(cacheDir, { recursive: true, force: true })
-    await mkdir(cacheDir, { recursive: true })
-    const existing = await httpFetch("https://example.com", TEST_TOPIC_ID)
-    const files = Array.from(new Bun.Glob("*.json").scanSync({ cwd: cacheDir }))
-    expect(files.length).toBeGreaterThan(0)
-    await writeFile(join(cacheDir, files[0]), "{invalid json")
-
-    const refreshed = await httpFetch("https://example.com", TEST_TOPIC_ID)
-    expect(refreshed.cached).toBe(false)
-    expect(refreshed.raw_content.length).toBeGreaterThan(0)
-    expect(refreshed.url).toBe(existing.url)
-  })
+  // Removed behavior (disk cache no longer exists — see note above).
+  it.skip("re-fetches when cache file is corrupted", async () => {})
 
   it("surfaces timeout errors when both Jina and fallback hang", async () => {
     const originalFetch = globalThis.fetch
@@ -404,84 +422,87 @@ describe("httpFetch", () => {
 })
 
 describe("timelineLookup", () => {
+  // Drive timelineLookup through the REAL webSearch with a mocked fetch (SearXNG JSON). We avoid
+  // mock.module here because Bun's mock.module persists process-wide and leaks the stub into other
+  // test files (notably src/tools/external/webSearch.test.ts).
   it("returns array of timeline events with correct shape", async () => {
-    const webSearchModule = await import("../src/tools/external/webSearch")
-    mock.module("../src/tools/external/webSearch", () => ({
-      ...webSearchModule,
-      webSearch: async () => [
-        {
-          title: "Iran protests timeline update",
-          url: "https://example.com/2024/01/15/protests",
-          snippet: "January 15, 2024 protests update",
-          date: "2024-01-15",
-        },
-        {
-          title: "Iran protests follow-up",
-          url: "https://example.com/2024/03/20/follow-up",
-          snippet: "March 20, 2024 follow-up",
-          date: "2024-03-20",
-        },
-      ],
-    }))
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+      if (url.startsWith("http://localhost:8080/")) {
+        return new Response(JSON.stringify({
+          results: [
+            { title: "Iran protests timeline update", url: "https://example.com/2024/01/15/protests", content: "January 15, 2024 protests update" },
+            { title: "Iran protests follow-up", url: "https://example.com/2024/03/20/follow-up", content: "March 20, 2024 follow-up" },
+          ],
+        }), { status: 200, headers: { "Content-Type": "application/json" } })
+      }
+      return originalFetch(input as RequestInfo, init)
+    }) as typeof fetch
 
-    const events = await timelineLookup("Iran", "protests", {
-      from: "2024-01-01",
-      to: "2025-01-01",
-    })
-    expect(Array.isArray(events)).toBe(true)
-    expect(events.length).toBeGreaterThan(0)
-    for (const e of events) {
-      expect(typeof e.date).toBe("string")
-      expect(typeof e.event).toBe("string")
-      expect(typeof e.source_url).toBe("string")
-      expect(typeof e.relevance).toBe("number")
+    try {
+      const events = await timelineLookup("Iran", "protests", {
+        from: "2024-01-01",
+        to: "2025-01-01",
+      })
+      expect(Array.isArray(events)).toBe(true)
+      expect(events.length).toBeGreaterThan(0)
+      for (const e of events) {
+        expect(typeof e.date).toBe("string")
+        expect(typeof e.event).toBe("string")
+        expect(typeof e.source_url).toBe("string")
+        expect(typeof e.relevance).toBe("number")
+      }
+      console.log(`timelineLookup returned ${events.length} events`)
+    } finally {
+      globalThis.fetch = originalFetch
     }
-    console.log(`timelineLookup returned ${events.length} events`)
   })
 })
 
 describe("cross-area integration", () => {
+  // Mocked end-to-end (NO network): SearXNG returns one result, then httpFetch's HTML fallback
+  // (Jina throws) turns that URL into markdown. Exercises the search→fetch handoff offline.
   it("feeds webSearch URLs into httpFetch for markdown content", async () => {
-    const results = await webSearch("example domain", 3)
-    expect(results.length).toBeGreaterThan(0)
+    const originalFetch = globalThis.fetch
+    const targetUrl = "https://example.com/2026/03/27/report"
 
-    const fetched = await httpFetch(results[0].url)
-    expect(fetched.url).toBe(results[0].url)
-    expect(fetched.raw_content.length).toBeGreaterThan(50)
-    expect(fetched.raw_content).not.toMatch(/<[^>]+>/)
-    console.log(`search→fetch succeeded for ${results[0].url}`)
-  })
-})
+    // Real webSearch driven entirely by a mocked fetch (NO mock.module — that leaks across files):
+    // SearXNG returns one result, then httpFetch turns its URL into markdown via the readability
+    // fallback (Jina throws). Exercises the search→fetch handoff offline.
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
+      if (url.startsWith("http://localhost:8080/")) {
+        return new Response(JSON.stringify({
+          results: [{ title: "Example report", url: targetUrl, content: "March 27, 2026 report" }],
+        }), { status: 200, headers: { "Content-Type": "application/json" } })
+      }
+      if (url.startsWith("https://r.jina.ai/")) {
+        throw new Error("Jina unavailable")
+      }
+      if (url === targetUrl) {
+        return new Response(
+          `<!doctype html><html><head><title>Example report</title></head>
+           <body><main><h1>Example report</h1>
+           <p>This domain is for documentation examples without needing permission.</p>
+           <p><a href="https://iana.org/domains/example">Learn more</a></p></main></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html" } },
+        )
+      }
+      return originalFetch(input as RequestInfo, init)
+    }) as typeof fetch
 
-describe("searchUtils", () => {
-  it("scores recent dated results higher and keeps recent items in selections", () => {
-    const recent = {
-      title: "Fresh geopolitical briefing",
-      url: "https://example.com/fresh",
-      snippet: "Latest regional developments and analysis",
-      date: "2026-03-20",
+    try {
+      const results = await webSearch("example report", 3)
+      expect(results.length).toBeGreaterThan(0)
+
+      const fetched = await httpFetch(results[0].url)
+      expect(fetched.url).toBe(results[0].url)
+      expect(fetched.raw_content.length).toBeGreaterThan(50)
+      expect(fetched.raw_content).not.toMatch(/<[^>]+>/)
+      console.log(`search→fetch succeeded for ${results[0].url}`)
+    } finally {
+      globalThis.fetch = originalFetch
     }
-    const old = {
-      title: "Older geopolitical briefing",
-      url: "https://example.com/old",
-      snippet: "Latest regional developments and analysis",
-      date: "2024-01-15",
-    }
-    const undated = {
-      title: "Undated backgrounder",
-      url: "https://example.com/background",
-      snippet: "Regional overview and context",
-    }
-
-    const recentScore = scoreResult(recent, ["geopolitical", "latest"])
-    const oldScore = scoreResult(old, ["geopolitical", "latest"])
-    expect(recentScore - oldScore).toBeGreaterThanOrEqual(15)
-
-    const best = selectBestResults([old, recent, undated], ["geopolitical", "latest"], 2)
-    expect(best.some(result => result.url === recent.url)).toBe(true)
-
-    const recentOnly = selectRecentResults([old, recent, undated], ["regional"], 3, 90)
-    expect(recentOnly.some(result => result.url === recent.url)).toBe(true)
-    expect(recentOnly.some(result => result.url === old.url)).toBe(false)
   })
 })

@@ -2,43 +2,46 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test"
 import { getClue, getClueIndex } from "../src/tools/internal/getClue"
 import { getPartyProfile, getPartyIndex } from "../src/tools/internal/getPartyProfile"
 import { writeArtifact, readArtifact, artifactExists } from "../src/tools/internal/artifactStore"
+import { resetDb, seedTopic, seedClues, seedParties, makeClue, makeClueVersion } from "./setup"
 import { mkdir, rm } from "fs/promises"
 import { join } from "path"
 
 const TEST_DATA_DIR = "/tmp/dana-internal-tools-test"
 const TOPIC_ID = "test-internal"
 
+// Clues/parties are now read from SQLite (not clues.json/parties.json), so seed via the DB helpers.
 const MOCK_CLUES = [
-  {
+  makeClue({
     id: "clue-001", current: 2, added_at: "2026-01-01T00:00:00Z", last_updated_at: "2026-01-02T00:00:00Z",
-    added_by: "auto", status: "verified",
     versions: [
-      { v: 1, date: "2026-01-01T00:00:00Z", title: "Clue v1 title", timeline_date: "2026-01-01",
+      makeClueVersion({ v: 1, date: "2026-01-01T00:00:00Z", title: "Clue v1 title", timeline_date: "2026-01-01",
         party_relevance: ["irgc"], domain_tags: ["military"], relevance_score: 80,
-        raw_source: { url: "https://example.com", fetched_at: "2026-01-01T00:00:00Z" },
-        source_credibility: { score: 75, notes: "", bias_flags: [], origin_source: { url: "https://example.com", outlet: "Example", is_republication: false } },
-        bias_corrected_summary: "Summary v1", clue_type: "event", change_note: "Initial", key_points: [] },
-      { v: 2, date: "2026-01-02T00:00:00Z", title: "Clue v2 title", timeline_date: "2026-01-02",
+        raw_source: { urls: ["https://example.com"], outlets: ["Example"], fetched_at: "2026-01-01T00:00:00Z" },
+        source_credibility: { score: 75, notes: "", bias_flags: [], origin_sources: [{ url: "https://example.com", outlet: "Example", is_republication: false }] },
+        bias_corrected_summary: "Summary v1", change_note: "Initial" }),
+      makeClueVersion({ v: 2, date: "2026-01-02T00:00:00Z", title: "Clue v2 title", timeline_date: "2026-01-02",
         party_relevance: ["irgc", "opposition"], domain_tags: ["military"], relevance_score: 90,
-        raw_source: { url: "https://example.com/v2", fetched_at: "2026-01-02T00:00:00Z" },
-        source_credibility: { score: 80, notes: "", bias_flags: [], origin_source: { url: "https://example.com/v2", outlet: "Example", is_republication: false } },
-        bias_corrected_summary: "Summary v2", clue_type: "event", change_note: "Update", key_points: [] },
+        raw_source: { urls: ["https://example.com/v2"], outlets: ["Example"], fetched_at: "2026-01-02T00:00:00Z" },
+        source_credibility: { score: 80, notes: "", bias_flags: [], origin_sources: [{ url: "https://example.com/v2", outlet: "Example", is_republication: false }] },
+        bias_corrected_summary: "Summary v2", change_note: "Update" }),
     ]
-  }
+  })
 ]
 
 const MOCK_PARTIES = [
-  { id: "irgc", name: "IRGC", type: "state_military", description: "...", weight: 87,
+  { id: "irgc", name: "IRGC", type: "state_military" as const, description: "...", weight: 87,
     weight_factors: { military_capacity: 90, economic_control: 75, information_control: 70, international_support: 40, internal_legitimacy: 35 },
-    agenda: "Preserve the state", means: ["military"], circle: { visible: [], shadow: [] },
-    stance: "defensive_active", vulnerabilities: ["sanctions"], auto_discovered: true, user_verified: false }
+    agenda: "Preserve the state", means: ["military"],
+    stance: "defensive_active", vulnerabilities: ["sanctions"] }
 ]
 
 beforeAll(async () => {
   process.env.DATA_DIR = TEST_DATA_DIR
   await mkdir(join(TEST_DATA_DIR, "topics", TOPIC_ID, "logs"), { recursive: true })
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "clues.json"), JSON.stringify(MOCK_CLUES))
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "parties.json"), JSON.stringify(MOCK_PARTIES))
+  resetDb()
+  seedTopic(TOPIC_ID)
+  seedClues(TOPIC_ID, MOCK_CLUES)
+  seedParties(TOPIC_ID, MOCK_PARTIES)
 })
 
 afterAll(async () => {

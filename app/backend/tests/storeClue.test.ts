@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test"
 import { storeClue } from "../src/tools/processing/storeClue"
+import { dbGetClues } from "../src/db/queries/clues"
+import { resetDb, seedTopic } from "./setup"
 import { mkdir, rm } from "fs/promises"
 import { join } from "path"
 
@@ -21,8 +23,9 @@ const mockProcessed = {
 beforeAll(async () => {
   process.env.DATA_DIR = TEST_DATA_DIR
   await mkdir(join(TEST_DATA_DIR, "topics", TOPIC_ID), { recursive: true })
-  // Create empty clues.json
-  await Bun.write(join(TEST_DATA_DIR, "topics", TOPIC_ID, "clues.json"), "[]")
+  // Clues are persisted to SQLite now (not clues.json); just seed the parent topic.
+  resetDb()
+  seedTopic(TOPIC_ID)
 })
 
 afterAll(async () => {
@@ -30,11 +33,15 @@ afterAll(async () => {
 })
 
 describe("storeClue", () => {
-  it("creates a new clue and writes to clues.json", async () => {
+  // Contract change: storeClue now takes sourceUrls[] (+ optional sourceOutlets[]) and persists to
+  // SQLite. The origin outlet is derived from sourceOutlets (or the URL host), not from the
+  // processed.origin_source field, so we pass the outlet explicitly to assert it round-trips.
+  it("creates a new clue persisted to the DB", async () => {
     const result = await storeClue({
       topicId: TOPIC_ID,
       title: "Security forces deployed in Tehran",
-      sourceUrl: "https://bbc.com/iran-protests",
+      sourceUrls: ["https://bbc.com/iran-protests"],
+      sourceOutlets: ["Reuters"],
       fetchedAt: new Date().toISOString(),
       processed: mockProcessed,
       partyRelevance: ["irgc", "opposition"],
@@ -46,18 +53,18 @@ describe("storeClue", () => {
     expect(result.clue_id).toBe("clue-001")
     expect(result.version).toBe(1)
 
-    // Verify written to disk
-    const clues = await Bun.file(join(TEST_DATA_DIR, "topics", TOPIC_ID, "clues.json")).json() as any[]
+    // Verify persisted to the DB (clues.json no longer exists — storage moved to SQLite).
+    const clues = dbGetClues(TOPIC_ID)
     expect(clues.length).toBe(1)
     expect(clues[0].id).toBe("clue-001")
-    expect(clues[0].versions[0].source_credibility.origin_source.outlet).toBe("Reuters")
+    expect(clues[0].versions[0].source_credibility.origin_sources[0].outlet).toBe("Reuters")
   })
 
   it("rejects a duplicate (same URL + same timeline_date)", async () => {
     const result = await storeClue({
       topicId: TOPIC_ID,
       title: "Security forces deployed in Tehran (duplicate)",
-      sourceUrl: "https://bbc.com/iran-protests",
+      sourceUrls: ["https://bbc.com/iran-protests"],
       fetchedAt: new Date().toISOString(),
       processed: mockProcessed,
       timelineDate: "2026-01-15",
@@ -65,9 +72,8 @@ describe("storeClue", () => {
 
     expect(result.status).toBe("duplicate")
 
-    // File should still have only 1 clue
-    const clues = await Bun.file(join(TEST_DATA_DIR, "topics", TOPIC_ID, "clues.json")).json() as any[]
-    expect(clues.length).toBe(1)
+    // DB should still have only 1 clue
+    expect(dbGetClues(TOPIC_ID).length).toBe(1)
   })
 
   it("handles concurrent writes without corruption", async () => {
@@ -76,7 +82,7 @@ describe("storeClue", () => {
       storeClue({
         topicId: TOPIC_ID,
         title: `Clue ${i + 2}`,
-        sourceUrl: `https://source-${i + 2}.com/article`,
+        sourceUrls: [`https://source-${i + 2}.com/article`],
         fetchedAt: new Date().toISOString(),
         processed: { ...mockProcessed, date_references: [`2026-01-${16 + i}`] },
         timelineDate: `2026-01-${16 + i}`,
@@ -90,9 +96,9 @@ describe("storeClue", () => {
     const ids = results.map(r => r.clue_id)
     expect(new Set(ids).size).toBe(5)
 
-    // File should have 6 clues total (1 original + 5 new)
-    const clues = await Bun.file(join(TEST_DATA_DIR, "topics", TOPIC_ID, "clues.json")).json() as any[]
+    // DB should have 6 clues total (1 original + 5 new)
+    const clues = dbGetClues(TOPIC_ID)
     expect(clues.length).toBe(6)
-    console.log("Clue IDs after concurrent writes:", clues.map((c: any) => c.id))
+    console.log("Clue IDs after concurrent writes:", clues.map(c => c.id))
   })
 })
