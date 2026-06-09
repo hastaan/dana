@@ -12,6 +12,8 @@ parties still get a minimum floor so every voice is heard).
 import dspy
 from pydantic import BaseModel, Field
 
+from ..research.gold import get_discovery_guidance
+
 FACTORS = ("military_capacity", "economic_control", "information_control",
            "international_support", "internal_legitimacy")
 LOW_WEIGHT_FLOOR = 150
@@ -25,6 +27,8 @@ class PartyWeight(BaseModel):
     international_support: int = Field(ge=0, le=100)
     internal_legitimacy: int = Field(ge=0, le=100)
     justification: str = Field(default="", description="1 sentence on the dominant factors")
+    means: list[str] = Field(default_factory=list, description="specific levers of power / real capabilities this party has, grounded in the evidence")
+    vulnerabilities: list[str] = Field(default_factory=list, description="specific weak points / constraints from the evidence")
 
 
 class RepDraft(BaseModel):
@@ -34,14 +38,25 @@ class RepDraft(BaseModel):
 
 
 class AssessWeights(dspy.Signature):
-    """Score each party's influence over the outcome on five 0–100 factors, grounded in the
-    evidence. Be discriminating — not everyone is a 70. A party with little military reach but
-    strong information control should show that asymmetry. One-sentence justification each."""
+    """Score each party's influence over the outcome on five 0-100 factors, grounded in the
+    evidence, AND profile each party. Be discriminating - not everyone is a 70. A party with
+    little military reach but strong information control should show that asymmetry. For each
+    party also list its `means` (specific levers of power / real capabilities named in the
+    evidence) and `vulnerabilities` (specific weak points / constraints from the evidence);
+    do NOT invent capabilities the evidence does not support. One-sentence justification each.
+
+    For a party of type='alliance' (its members are listed after 'members:' in the parties
+    input): score the COMBINED capability of all listed members on each axis (combined military
+    capacity, combined economic weight, etc.), set internal_legitimacy to the cohesion/unity of
+    the bloc, and union the members' means and vulnerabilities."""
 
     topic: str = dspy.InputField()
-    parties: str = dspy.InputField(desc="id, name, type, agenda")
+    parties: str = dspy.InputField(desc="id, name, type, agenda; alliance rows also list 'members: ...'")
     evidence: str = dspy.InputField()
     weights: list[PartyWeight] = dspy.OutputField()
+
+
+AssessWeights.__doc__ += ("\n\n    GOLD LESSON (internal_legitimacy discipline): " + get_discovery_guidance())
 
 
 class GenerateRepresentatives(dspy.Signature):

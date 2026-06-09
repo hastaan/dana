@@ -10,6 +10,7 @@ from typing import Callable
 
 import dspy
 
+from ..agents.forum_prep import FACTORS, AssessWeights, final_weight
 from ..db import writers
 from . import signatures as sig
 from .retriever import DanaRetriever, Information, ResearchBudget
@@ -82,6 +83,7 @@ class StormResearchEngine:
         self.researcher = GroundedResearcher(self.retriever)
         self.distill = dspy.ChainOfThought(sig.DistillClues)
         self.refine = dspy.ChainOfThought(sig.RefineParties)
+        self.score = dspy.ChainOfThought(AssessWeights)
         self._used_ids: set[str] = set()  # guarantees unique party ids (slugify truncates to 30 → collisions)
 
     def _uid(self, name: str) -> str:
@@ -279,6 +281,71 @@ class StormResearchEngine:
                   "detail": g.reason[:100]})
         return parties[: self.cfg.max_parties]
 
+    # ── Phase 3.6: score the 5 influence axes + profile parties from gathered clues ──
+    def _score_and_profile(self, topic, parties, clues, emit):
+        """ONE non-search LLM pass that scores the 5 influence axes AND fills means/
+        vulnerabilities for every party from the ALREADY-gathered clues - so a discovery-only
+        review shows full pentagon scores + profiles instead of zeros/dashes. Reuses the
+        forum-prep AssessWeights signature + final_weight (the sanctioned mean). Costs exactly
+        one LLM call, zero extra web searches. Non-fatal: any failure leaves seeded parties as-is.
+        Gate with DANA_SCORE_DISCOVERY (default '1'), mirroring DANA_REFINE_DISCOVERY."""
+        if os.getenv('DANA_SCORE_DISCOVERY', '1') == '0' or not parties:
+            return parties
+        evidence = '\n'.join(
+            f"- {c.get('title','')}: {c.get('summary','')[:200]}" for c in clues[:30]
+        ) or '(no clues gathered)'
+        # id-bearing party_str so the model echoes ids back (the forum-prep format); append the
+        # member roster for alliance rows so the model scores the COMBINED bloc.
+        def _row(p):
+            base = f"- {p['id']} | {p['name']} ({p.get('type','?')}): {p.get('agenda') or p.get('description') or '-'}"
+            mem = (p.get('circle') or {}).get('visible') or []
+            return base + (f"  members: {', '.join(mem)}" if p.get('type') == 'alliance' and mem else '')
+        party_str = '\n'.join(_row(p) for p in parties)
+        try:
+            ws = self.score(topic=topic, parties=party_str, evidence=evidence).weights
+        except Exception:  # noqa: BLE001
+            return parties
+        by_id = {p['id']: p for p in parties}
+
+        def _match(wid: str):
+            """Resolve a returned party_id robustly — the LLM sometimes echoes a paraphrased id
+            or the name instead of the exact id; fall back to slug match so the party isn't
+            silently skipped (→ left at weight 0 / empty, the very symptom we're fixing)."""
+            p = by_id.get(wid)
+            if p is not None:
+                return p
+            ws_slug = writers.slugify(wid or '')
+            for q in parties:
+                if q['id'] == ws_slug or writers.slugify(q['name']) == ws_slug:
+                    return q
+            return None
+
+        scored: set[str] = set()
+        for w in (ws or []):
+            p = _match(w.party_id)
+            if p is None:
+                continue
+            scored.add(p['id'])
+            p['weight_factors'] = {f: getattr(w, f) for f in FACTORS}
+            p['weight'] = final_weight(w)
+            p['weight_evidence'] = {f: (w.justification or '') for f in FACTORS}
+            if w.means:
+                p['means'] = list(dict.fromkeys(w.means))
+            if w.vulnerabilities:
+                p['vulnerabilities'] = list(dict.fromkeys(w.vulnerabilities))
+            emit({'type': 'think', 'icon': '⚖', 'label': f"Scored · {p['name']}", 'detail': f"weight {p['weight']}"})
+
+        # FLOOR — any party the scorer skipped gets a low non-zero baseline so the UI never shows
+        # an all-zero/empty party (mirrors forum_prep's setdefault fallback). Honest about being
+        # an estimate; keeps the party visible + weighted in later stages instead of dropped.
+        for p in parties:
+            if p['id'] in scored or p.get('weight_factors'):
+                continue
+            p['weight_factors'] = {f: 20 for f in FACTORS}
+            p['weight'] = round(sum(p['weight_factors'].values()) / len(FACTORS), 1)
+            p['weight_evidence'] = {f: 'Baseline estimate — not individually scored.' for f in FACTORS}
+        return parties
+
     # ── Enrichment: deeper per-party research over EXISTING parties ──
     def enrich(self, topic: str, description: str, parties: list[dict], emit: Emit) -> dict:
         """Reuse the grounded conversation/distill loop, but seed personas from the parties
@@ -314,6 +381,9 @@ class StormResearchEngine:
             all_clues.extend(self._distill_clues(topic, persona, history, emit))
         # Consolidate: ADD evidenced externals + GROUP aligned blocs into named alliances.
         parties = self._refine_parties(topic, parties, all_clues, emit)
+        # Score the 5 influence axes + fill means/vulnerabilities from the gathered clues (one
+        # non-search LLM pass) so a discovery-only review shows full profiles, not zeros.
+        parties = self._score_and_profile(topic, parties, all_clues, emit)
         return {
             "parties": parties, "clues": all_clues, "outline": outline,
             "searches_used": self.budget.searches_used, "cache_hits": self.budget.cache_hits,
