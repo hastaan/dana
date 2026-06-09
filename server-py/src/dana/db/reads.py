@@ -94,6 +94,10 @@ async def list_parties(topic_id: str) -> list[dict]:
             "weight": r["weight"], "agenda": r["agenda"], "stance": r["stance"],
             "means": json.loads(r["means"] or "[]"),
             "weight_factors": json.loads(r["weight_factors"] or "{}"),
+            # Full shape for frontend parity (⇄ TS dbGetParties): circle, vulnerabilities, weight_evidence.
+            "weight_evidence": json.loads(r["weight_evidence"] or "{}"),
+            "circle": json.loads(r["circle"] or '{"visible": [], "shadow": []}'),
+            "vulnerabilities": json.loads(r["vulnerabilities"] or "[]"),
             "auto_discovered": bool(r["auto_discovered"]), "user_verified": bool(r["user_verified"]),
         })
     return out
@@ -125,6 +129,41 @@ async def list_clues(topic_id: str) -> list[dict]:
             "sources": [s.get("url") for s in cred.get("origin_sources", [])],
         })
     return out
+
+
+async def list_clues_api(topic_id: str) -> list[dict]:
+    """Frontend-shaped clues (⇄ TS dbGetClues): each clue is {id, status, added_by, added_at,
+    last_updated_at, current: <version#>, versions: [<full version objects>]} — the shape the
+    React app consumes (clue.current + clue.versions[].*). Distinct from list_clues(), which
+    returns the flat current-version view that server-py's own pipeline stages rely on."""
+    async with get_engine().connect() as conn:
+        clues = (await conn.execute(
+            text("SELECT id,status,added_by,added_at,last_updated_at,current_version "
+                 "FROM clues WHERE topic_id=:t"), {"t": topic_id},
+        )).mappings().all()
+        vrows = (await conn.execute(
+            text("SELECT * FROM clue_versions WHERE topic_id=:t ORDER BY clue_id, version"),
+            {"t": topic_id},
+        )).mappings().all()
+    by_clue: dict[str, list] = {}
+    for v in vrows:
+        by_clue.setdefault(v["clue_id"], []).append({
+            "v": v["version"], "title": v["title"], "date": v["date"],
+            "timeline_date": v["timeline_date"], "clue_type": v["clue_type"],
+            "relevance_score": v["relevance_score"],
+            "party_relevance": json.loads(v["party_relevance"] or "[]"),
+            "domain_tags": json.loads(v["domain_tags"] or "[]"),
+            "bias_corrected_summary": v["bias_corrected_summary"], "change_note": v["change_note"],
+            "key_points": json.loads(v["key_points"] or "[]"),
+            "fact_check": json.loads(v["fact_check"] or "{}"),
+            "raw_source": json.loads(v["raw_source"] or "{}"),
+            "source_credibility": json.loads(v["source_credibility"] or "{}"),
+        })
+    return [{
+        "id": c["id"], "status": c["status"], "added_by": c["added_by"],
+        "added_at": c["added_at"], "last_updated_at": c["last_updated_at"],
+        "current": c["current_version"], "versions": by_clue.get(c["id"], []),
+    } for c in clues]
 
 
 async def list_representatives(topic_id: str) -> list[dict]:

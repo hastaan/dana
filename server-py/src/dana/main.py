@@ -72,10 +72,28 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     # Full-cutover mode: if a built React frontend is present, serve it as the SPA so this
-    # one process replaces the TS server entirely. Mounted LAST so /api/* routes win.
+    # one process replaces the TS server entirely.
     dist = os.getenv("FRONTEND_DIST") or str(Path(__file__).resolve().parents[3] / "app" / "frontend" / "dist")
-    if Path(dist).is_dir():
-        app.mount("/", StaticFiles(directory=dist, html=True), name="spa")
+    dist_path = Path(dist)
+    if dist_path.is_dir():
+        # Serve built assets (/assets/*, favicon, etc.) from disk…
+        app.mount("/assets", StaticFiles(directory=str(dist_path / "assets")), name="spa-assets")
+        index_html = dist_path / "index.html"
+
+        # …and history-API fallback: any non-/api, non-/health GET returns index.html so
+        # client-side routes (/research, /settings, /topic/:id) work on refresh/deep-link.
+        # Registered LAST so all real API routes still win.
+        from fastapi import Request
+        from fastapi.responses import FileResponse, Response
+
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str, request: Request):
+            if full_path.startswith(("api/", "stream", "health", "docs", "openapi")):
+                return Response(status_code=404)
+            candidate = dist_path / full_path
+            if full_path and candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(index_html)
 
     return app
 

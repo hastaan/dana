@@ -40,7 +40,7 @@ async def get_parties(topic_id: str):
 
 @router.get("/api/topics/{topic_id}/clues")
 async def get_clues(topic_id: str):
-    return await reads.list_clues(topic_id)
+    return await reads.list_clues_api(topic_id)
 
 
 # ── Verdict / expert council (⇄ TS expertCouncil.ts) ───────────────────────────

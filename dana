@@ -66,6 +66,13 @@ pyserve() {
   else
     echo "Using existing built SPA at app/frontend/dist."
   fi
+  # Share the dana container's CLIProxyAPI management secret so server-py can manage custom
+  # providers too (else /api/providers/custom → 503). The dana entrypoint persists it here.
+  local secret_file="${DATA_DIR:-$DANA_DIR/data}/.management-secret"
+  if [ -z "${MANAGEMENT_SECRET:-}" ] && [ -f "$secret_file" ]; then
+    export MANAGEMENT_SECRET="$(cat "$secret_file")"
+    echo "Using the proxy management secret from $secret_file (custom providers enabled)."
+  fi
   echo "Building + starting the Python backend (server-py) on :$PYSERVE_PORT (serving the SPA)…"
   dc --profile pyserve up -d --build server-py "$@"
   echo "server-py → http://localhost:$PYSERVE_PORT   (\`dana logs server-py\` to watch · \`dana pyserve-stop\` to stop)"
