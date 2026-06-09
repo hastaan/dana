@@ -65,4 +65,14 @@ def make_lm(model: str | None = None, **kwargs) -> dspy.LM:
 def configure(model: str | None = None, **kwargs) -> dspy.LM:
     lm = make_lm(model, **kwargs)
     dspy.configure(lm=lm)
+    # Install any operator instruction-overrides onto the DSPy signatures BEFORE the pipeline
+    # stage constructs its modules (every stage builds its modules right after this call). With
+    # no overrides set this restores every signature to its shipped default → a no-op. Imported
+    # lazily to avoid a circular import (llm.prompts imports the signatures, which is fine, but
+    # keeping it lazy also means a failure here can never break LM configuration).
+    try:
+        from . import prompts as _prompts
+        _prompts.apply_overrides()
+    except Exception:  # noqa: BLE001 — overrides are best-effort; never break configure()
+        pass
     return lm

@@ -366,6 +366,60 @@ def corpus_store_page(topic_id: str, url: str, title: str, content: str, stage: 
         )
 
 
+# ── Prompt overrides (Lane A — instruction-override layer ⇄ TS routes/prompts.ts) ─
+# model + tools live in `prompt_configs` (the table the TS backend already created — same
+# columns: name, model, tools, updated_at). The instruction TEXT override has no home in
+# that schema, so it lives in a dedicated `prompt_overrides` table created on demand. Both
+# are keyed by the stable prompt NAME (see llm/prompts.py REGISTRY). DEFAULT = no row =
+# byte-identical current behavior (the signature's own __doc__).
+def set_prompt_config(name: str, model: str | None = None, tools: list[str] | None = None) -> dict:
+    """Upsert the model/tools config for a prompt (⇄ setPromptConfig). Unset fields are
+    preserved from the current row. Returns the resulting {model, tools}."""
+    with connect() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS prompt_configs ("
+            "name TEXT PRIMARY KEY, model TEXT, tools TEXT NOT NULL DEFAULT '[]', updated_at TEXT)"
+        )
+        row = c.execute("SELECT model, tools FROM prompt_configs WHERE name=?", (name,)).fetchone()
+        cur_model = row["model"] if row else None
+        cur_tools = json.loads(row["tools"]) if row and row["tools"] else []
+        next_model = model if model is not None else cur_model
+        next_tools = tools if tools is not None else cur_tools
+        c.execute(
+            "INSERT INTO prompt_configs (name,model,tools,updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET model=excluded.model, tools=excluded.tools, "
+            "updated_at=excluded.updated_at",
+            (name, next_model, json.dumps(next_tools), ISO()),
+        )
+    return {"model": next_model, "tools": next_tools}
+
+
+def set_prompt_instructions(name: str, content: str) -> None:
+    """Persist an instruction-text override for a prompt (⇄ writeFileSync on the .md)."""
+    with connect() as c:
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS prompt_overrides ("
+            "name TEXT PRIMARY KEY, instructions TEXT NOT NULL, updated_at TEXT)"
+        )
+        c.execute(
+            "INSERT INTO prompt_overrides (name,instructions,updated_at) VALUES (?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET instructions=excluded.instructions, "
+            "updated_at=excluded.updated_at",
+            (name, content, ISO()),
+        )
+
+
+def clear_prompt_instructions(name: str) -> bool:
+    """Drop a prompt's instruction-text override (⇄ reset → restore backup). Returns whether
+    a row existed. Best-effort: a missing table means there was nothing to clear."""
+    try:
+        with connect() as c:
+            cur = c.execute("DELETE FROM prompt_overrides WHERE name=?", (name,))
+            return cur.rowcount > 0
+    except sqlite3.Error:
+        return False
+
+
 # ── Synthesis cache (re-uses research_pages via a synthetic dana:// url key) ─────
 def synthesis_url(level: str, query: str) -> str:
     """Synthetic url key under which a synthesized output is cached in research_pages."""

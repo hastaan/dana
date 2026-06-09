@@ -19,6 +19,7 @@ from .api import internet as internet_api
 from .api.auth import ApiTokenMiddleware
 from .api import models as models_api
 from .api import pipeline as pipeline_api
+from .api import prompts as prompts_api
 from .api import providers as providers_api
 from .api import settings as settings_api
 from .api import stream as stream_api
@@ -63,6 +64,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_api.router)
     app.include_router(providers_api.router)
     app.include_router(internet_api.router)
+    app.include_router(prompts_api.router)
 
     @app.get("/health")
     @app.get("/api/health")

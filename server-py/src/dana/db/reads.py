@@ -37,6 +37,51 @@ def get_cached_synthesis(topic_id: str, level: str, query: str,
         return None
 
 
+# ── Prompt overrides (Lane A — sync; read at DSPy-configure time in the worker thread,
+#    and by the api/prompts.py router. Mirror corpus_find_search's connect() pattern) ──
+def get_prompt_instructions(name: str) -> str | None:
+    """Return the persisted instruction-text override for a prompt, or None when unset
+    (→ caller falls back to the signature's own __doc__). A missing table → cache miss."""
+    try:
+        with connect() as c:
+            row = c.execute(
+                "SELECT instructions FROM prompt_overrides WHERE name=?", (name,)
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return row["instructions"] if row else None
+
+
+def get_prompt_config(name: str) -> dict:
+    """Return the {model, tools} config for a prompt (⇄ getPromptConfig). DEFAULT = no row =
+    {model: None, tools: []}. A missing table → default."""
+    try:
+        with connect() as c:
+            row = c.execute(
+                "SELECT model, tools FROM prompt_configs WHERE name=?", (name,)
+            ).fetchone()
+    except sqlite3.Error:
+        return {"model": None, "tools": []}
+    if not row:
+        return {"model": None, "tools": []}
+    try:
+        tools = json.loads(row["tools"]) if row["tools"] else []
+    except (ValueError, TypeError, json.JSONDecodeError):
+        tools = []
+    return {"model": row["model"], "tools": tools}
+
+
+def all_prompt_overrides() -> dict[str, str]:
+    """Return {name: instructions} for every persisted instruction override (⇄ for apply_overrides
+    to bulk-apply). Empty dict when the table is absent or empty (→ apply_overrides is a no-op)."""
+    try:
+        with connect() as c:
+            rows = c.execute("SELECT name, instructions FROM prompt_overrides").fetchall()
+    except sqlite3.Error:
+        return {}
+    return {r["name"]: r["instructions"] for r in rows}
+
+
 async def list_parties(topic_id: str) -> list[dict]:
     async with get_engine().connect() as conn:
         rows = (
