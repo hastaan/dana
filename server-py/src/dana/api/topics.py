@@ -9,6 +9,7 @@ from ..agents import party_intel
 from ..db import reads
 from ..db import topics as topics_repo
 from ..db import writers
+from ..events.bus import bus
 from ..llm import dspy_lm
 
 router = APIRouter()
@@ -196,27 +197,10 @@ async def add_party(topic_id: str, body: PartyBody):
     return scored
 
 
-@router.post("/api/topics/{topic_id}/parties/merge")
-async def merge_parties(topic_id: str, body: MergeBody):
-    """Merge >=2 parties into one (PartiesPanel merge — the user's chief complaint). Deterministic
-    union of circle/means/vulnerabilities/agenda is the reliable primary path (no LLM); the merged
-    party is rescored, the sources deleted, and the merged party persisted."""
-    topic = await _require_topic(topic_id)
-    if len(body.source_ids) < 2:
-        raise HTTPException(status_code=400, detail={"message": "Need at least 2 source_ids to merge"})
-    target = body.target or {}
-    tname = (target.get("name") or "").strip()
-    if not tname:
-        raise HTTPException(status_code=400, detail={"message": "target.name is required"})
-    sources = []
-    for sid in body.source_ids:
-        s = await asyncio.to_thread(writers.get_party, topic_id, sid)
-        if s is not None:
-            sources.append(s)
-    if len(sources) < 2:
-        raise HTTPException(status_code=400, detail={"message": "Not enough matching source parties"})
-    target_id = target.get("id") or writers.slugify(tname)
-    merged = {
+def _manual_merge(sources: list[dict], tname: str, target: dict, target_id: str) -> dict:
+    """Deterministic field union — the FALLBACK when LLM synthesis fails (⇄ TS merge route catch
+    block). Concatenates description/agenda, dedups means/circle/vulnerabilities."""
+    return {
         "id": target_id, "name": tname,
         "type": target.get("type") or sources[0]["type"],
         "description": " ".join(s.get("description", "") for s in sources).strip(),
@@ -232,8 +216,45 @@ async def merge_parties(topic_id: str, body: MergeBody):
         "auto_discovered": False, "user_verified": True,
     }
 
+
+@router.post("/api/topics/{topic_id}/parties/merge")
+async def merge_parties(topic_id: str, body: MergeBody):
+    """Merge >=2 parties into one (PartiesPanel merge — the user's chief complaint). LLM SYNTHESIS
+    via party_intel.SmartMergeParties is the PRIMARY path (⇄ TS smartMergeParties, prompt
+    party-intelligence/merge.md, GOLD-guarded against coalescing rival currents); the deterministic
+    field union is only the FALLBACK on LLM failure. The merged party is rescored, the sources
+    deleted, and the merged party persisted. Emits SSE think events so the activity feed shows
+    progress (⇄ TS emitThink taxonomy the frontend renders)."""
+    topic = await _require_topic(topic_id)
+    if len(body.source_ids) < 2:
+        raise HTTPException(status_code=400, detail={"message": "Need at least 2 source_ids to merge"})
+    target = body.target or {}
+    tname = (target.get("name") or "").strip()
+    if not tname:
+        raise HTTPException(status_code=400, detail={"message": "target.name is required"})
+    sources = []
+    for sid in body.source_ids:
+        s = await asyncio.to_thread(writers.get_party, topic_id, sid)
+        if s is not None:
+            sources.append(s)
+    if len(sources) < 2:
+        raise HTTPException(status_code=400, detail={"message": "Not enough matching source parties"})
+    target_id = target.get("id") or writers.slugify(tname)
+    src_names = ", ".join(s.get("name", "?") for s in sources)
+    bus.emit(topic_id, {"type": "think", "icon": "🔀", "label": f"Merging into {tname}", "detail": src_names[:100]})
+
     def _work():
         with dspy_lm.lm_context():
+            try:
+                prof = dspy.ChainOfThought(party_intel.SmartMergeParties)(
+                    topic=topic["title"], sources=json.dumps(sources), target_name=tname,
+                ).profile
+                merged = {**prof.model_dump(), "id": target_id, "name": prof.name or tname,
+                          "type": target.get("type") or prof.type,
+                          "weight": 0, "weight_factors": {}, "weight_evidence": {},
+                          "auto_discovered": False, "user_verified": True}
+            except Exception:  # noqa: BLE001 — LLM/parse failure -> deterministic union fallback
+                merged = _manual_merge(sources, tname, target, target_id)
             return party_intel.rescore_party(topic["title"], topic["description"], merged)
 
     scored = await asyncio.to_thread(_work)
@@ -244,6 +265,9 @@ async def merge_parties(topic_id: str, body: MergeBody):
         if sid != target_id:
             await asyncio.to_thread(writers.delete_party, topic_id, sid)
     await asyncio.to_thread(writers.upsert_party, topic_id, scored)
+    # Repoint clues from the (now-deleted) source parties to the merged party (⇄ TS dbReplaceClues).
+    await asyncio.to_thread(writers.remap_party_in_clues, topic_id, body.source_ids, scored.get("id", target_id))
+    bus.emit(topic_id, {"type": "think", "icon": "✅", "label": f"Merge complete: {scored.get('name', tname)}"})
     return scored
 
 
@@ -256,6 +280,7 @@ async def smart_add_party(topic_id: str, body: SmartAddBody):
         raise HTTPException(status_code=400, detail={"message": "name is required"})
     existing = await reads.list_parties(topic_id)
     existing_names = ", ".join(p["name"] for p in existing)
+    bus.emit(topic_id, {"type": "think", "icon": "➕", "label": f"Smart add: {name}"})
 
     def _work():
         with dspy_lm.lm_context():
@@ -276,6 +301,7 @@ async def smart_add_party(topic_id: str, body: SmartAddBody):
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail={"message": f"Smart add failed: {e}"})
     await asyncio.to_thread(writers.upsert_party, topic_id, scored)
+    bus.emit(topic_id, {"type": "think", "icon": "✅", "label": f"Smart add complete: {scored.get('name', name)}"})
     return scored
 
 
@@ -289,6 +315,8 @@ async def smart_edit_party(topic_id: str, party_id: str, body: SmartEditBody):
     current = await asyncio.to_thread(writers.get_party, topic_id, party_id)
     if current is None:
         raise HTTPException(status_code=404, detail={"message": "Party not found"})
+    # ⇄ TS PartyIntelligence.smartEditParty emitThink — match the exact label/icon the frontend renders.
+    bus.emit(topic_id, {"type": "think", "icon": "📝", "label": f"Smart edit: {current['name']}", "detail": fb[:100]})
 
     def _work():
         with dspy_lm.lm_context():
@@ -305,6 +333,7 @@ async def smart_edit_party(topic_id: str, party_id: str, body: SmartEditBody):
         raise HTTPException(status_code=500, detail={"message": f"Smart edit failed: {e}"})
     scored["id"] = current["id"]
     await asyncio.to_thread(writers.upsert_party, topic_id, scored)
+    bus.emit(topic_id, {"type": "think", "icon": "✅", "label": f"Smart edit complete: {scored['name']}"})
     return scored
 
 
@@ -321,6 +350,7 @@ async def split_party(topic_id: str, body: SplitBody):
     source = await asyncio.to_thread(writers.get_party, topic_id, body.source_id)
     if source is None:
         raise HTTPException(status_code=404, detail={"message": "Party not found"})
+    bus.emit(topic_id, {"type": "think", "icon": "🪓", "label": f"Splitting {source['name']}", "detail": ", ".join(names)[:100]})
 
     def _work():
         with dspy_lm.lm_context():
@@ -348,6 +378,10 @@ async def split_party(topic_id: str, body: SplitBody):
     await asyncio.to_thread(writers.delete_party, topic_id, body.source_id)
     for p in created:
         await asyncio.to_thread(writers.upsert_party, topic_id, p)
+    # Repoint clues from the split source to the primary new party so they don't dangle.
+    if created:
+        await asyncio.to_thread(writers.remap_party_in_clues, topic_id, [body.source_id], created[0].get("id"))
+    bus.emit(topic_id, {"type": "think", "icon": "✅", "label": f"Split complete: {', '.join(p['name'] for p in created)}"[:120]})
     return {"removed": body.source_id, "created": created}
 
 

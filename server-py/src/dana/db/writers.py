@@ -264,6 +264,40 @@ def count_clues(topic_id: str) -> int:
         return c.execute("SELECT COUNT(*) FROM clues WHERE topic_id=?", (topic_id,)).fetchone()[0]
 
 
+def remap_party_in_clues(topic_id: str, old_ids: list[str], new_id: str | None) -> int:
+    """Repoint clue.party_relevance after a merge/split so clues never reference a deleted party
+    (⇄ TS dbReplaceClues remap). merge → new_id = target id; split → new_id = primary new id;
+    new_id=None drops the refs. Rewrites every clue_versions row whose party_relevance contains an
+    old id, dedup-preserving order. Returns the number of rows changed."""
+    old = {x for x in (old_ids or []) if x}
+    if not old:
+        return 0
+    changed = 0
+    with connect() as c:
+        rows = c.execute(
+            "SELECT clue_id, version, party_relevance FROM clue_versions WHERE topic_id=?",
+            (topic_id,),
+        ).fetchall()
+        for r in rows:
+            try:
+                pr = json.loads(r["party_relevance"] or "[]")
+            except Exception:  # noqa: BLE001
+                continue
+            if not any(x in old for x in pr):
+                continue
+            new_pr: list[str] = []
+            for x in pr:
+                repl = new_id if x in old else x
+                if repl and repl not in new_pr:
+                    new_pr.append(repl)
+            c.execute(
+                "UPDATE clue_versions SET party_relevance=? WHERE clue_id=? AND topic_id=? AND version=?",
+                (json.dumps(new_pr), r["clue_id"], topic_id, r["version"]),
+            )
+            changed += 1
+    return changed
+
+
 # ── Research corpus cache (⇄ researchCorpus.ts) ────────────────────────────────
 def corpus_find_search(topic_id: str, query: str, max_age_hours: float = 24.0) -> list[dict] | None:
     with connect() as c:
