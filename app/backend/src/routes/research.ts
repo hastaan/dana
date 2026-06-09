@@ -23,6 +23,17 @@ interface Source {
   url: string
 }
 
+// SSE-style trace events emitted by the deep tiers (⇄ server-py research/internet.py emit dicts).
+// Verbatim shapes so the py backend, ts backend, and frontend all match exactly.
+type LookupEvent =
+  | { type: "think"; icon: string; label: string; detail?: string }
+  | { type: "progress"; stage: string; pct: number; msg: string }
+
+type OnEvent = (ev: LookupEvent) => void
+
+// Silent default so the existing POST callers (no callback) are unaffected.
+const noopEmit: OnEvent = () => {}
+
 // Per-source fetched-content cap, so synthesis prompts stay bounded.
 const MAX_CONTENT_CHARS = 4000
 // deep_search: hard cap on total page fetches across all angles, so it never floods.
@@ -101,12 +112,17 @@ async function quick(query: string, topK: number, language?: string) {
 }
 
 // ── deep_lookup ──────────────────────────────────────────────────────────────────
-async function deepLookup(query: string, topK: number, language?: string) {
+async function deepLookup(query: string, topK: number, language?: string, onEvent: OnEvent = noopEmit) {
+  onEvent({ type: "progress", stage: "deep_lookup", pct: 0.1, msg: `Looking up: ${query.slice(0, 80)}` })
+  onEvent({ type: "think", icon: "🔎", label: "Deep lookup", detail: query.slice(0, 100) })
   // Search the raw query AND keyword sub-queries, then aggregate: the raw query guarantees we
   // never do worse than a direct search, while keyword sub-queries (buildSubQueries) add
   // coverage for natural-language questions (a verbatim "what caused…" can match thesaurus
   // pages). De-duped; ≤3 searches total.
   const subs = [...new Set([query, ...(await buildSubQueries(query, 2))])].slice(0, 3)
+  for (const sub of subs) {
+    if (sub !== query) onEvent({ type: "think", icon: "❓", label: "Sub-question", detail: sub.slice(0, 100) })
+  }
   const seen = new Set<string>()
   const hits: SearchResult[] = []
   for (const sub of subs) {
@@ -167,6 +183,7 @@ async function deepLookup(query: string, topK: number, language?: string) {
     ],
   })
 
+  onEvent({ type: "progress", stage: "deep_lookup", pct: 1.0, msg: `Lookup complete — ${sources.length} sources` })
   return {
     status: "success" as const,
     level: "deep_lookup" as const,
@@ -217,10 +234,12 @@ async function buildSubQueries(query: string, max: number): Promise<string[]> {
 }
 
 // ── deep_search ──────────────────────────────────────────────────────────────────
-async function deepSearch(query: string, breadth: Breadth, topK: number, maxSubQuestions: number, language?: string) {
+async function deepSearch(query: string, breadth: Breadth, topK: number, maxSubQuestions: number, language?: string, onEvent: OnEvent = noopEmit) {
+  onEvent({ type: "progress", stage: "deep_search", pct: 0.05, msg: `Researching: ${query.slice(0, 80)}` })
   // Bounded fan-out: ≤3 sub-queries, ≤1 search each, total fetches capped.
   const nAngles = Math.min(maxSubQuestions, 3)
   const subQueries = await buildSubQueries(query, nAngles)
+  onEvent({ type: "think", icon: "🧭", label: `${subQueries.length} research angles`, detail: subQueries.join(" · ").slice(0, 120) })
 
   const sources: Source[] = []
   const srcIndex = new Map<string, number>()
@@ -228,8 +247,12 @@ async function deepSearch(query: string, breadth: Breadth, topK: number, maxSubQ
   let remainingFetches = DEEP_SEARCH_MAX_FETCHES
   const perAngleFetch = Math.max(1, Math.floor(DEEP_SEARCH_MAX_FETCHES / Math.max(1, subQueries.length)))
 
+  let angleIdx = 0
   for (const sub of subQueries) {
     if (remainingFetches <= 0) break
+    onEvent({ type: "progress", stage: "deep_search", pct: 0.1 + (0.8 * angleIdx) / Math.max(1, subQueries.length), msg: `Angle ${angleIdx + 1}/${subQueries.length}` })
+    onEvent({ type: "think", icon: "🔭", label: "Research angle", detail: sub.slice(0, 100) })
+    angleIdx++
     const hits = await webSearch(sub, topK, undefined, language)
     if (hits.length === 0) continue
 
@@ -270,6 +293,7 @@ async function deepSearch(query: string, breadth: Breadth, topK: number, maxSubQ
   const findings = blocks.join("\n\n---\n\n").slice(0, 14000)
   const sourceList = sources.map((s, i) => `[${i + 1}] ${s.title} — ${s.url}`).join("\n")
 
+  onEvent({ type: "progress", stage: "deep_search", pct: 0.95, msg: "Synthesizing briefing…" })
   const content = await chatCompletionText({
     model: synthesisModel(),
     temperature: 0.3,
@@ -290,6 +314,7 @@ async function deepSearch(query: string, breadth: Breadth, topK: number, maxSubQ
     ],
   })
 
+  onEvent({ type: "progress", stage: "deep_search", pct: 1.0, msg: `Briefing complete — ${sources.length} sources` })
   return {
     status: "success" as const,
     level: "deep_search" as const,
@@ -342,5 +367,78 @@ export const researchRouter = new Elysia()
       top_k: t.Optional(t.Number()),
       max_sub_questions: t.Optional(t.Number()),
       language: t.Optional(t.String()),
+    }),
+  })
+  // SSE streaming for the deep tiers (⇄ server-py GET /api/research/lookup/stream). Emits the
+  // tier's live think/progress trace events verbatim, then exactly one terminal event
+  // {"type":"result","result": <LookupResponse>}, then closes. The "quick" tier does NOT stream
+  // (stays a plain POST); a quick request here is upgraded to deep_lookup so the stream is useful.
+  .get("/api/research/lookup/stream", ({ query: q, set }) => {
+    const query = (q.query ?? "").trim()
+    const level: Level = q.level === "deep_search" ? "deep_search" : "deep_lookup"
+    const breadth: Breadth = q.breadth ?? "topic"
+    const topK = q.top_k ? Number(q.top_k) : undefined
+    const maxSubQuestions = q.max_sub_questions ? Number(q.max_sub_questions) : undefined
+    const language = q.language
+
+    set.headers["Content-Type"] = "text/event-stream"
+    set.headers["Cache-Control"] = "no-cache"
+    set.headers["Connection"] = "keep-alive"
+    set.headers["X-Accel-Buffering"] = "no"
+
+    const stream = new ReadableStream({
+      start(controller) {
+        const send = (ev: unknown) => {
+          try {
+            controller.enqueue(`data: ${JSON.stringify(ev)}\n\n`)
+          } catch {
+            // client disconnected
+          }
+        }
+        const onEvent: OnEvent = ev => send(ev)
+
+        const run = async () => {
+          if (!query) {
+            send({ type: "result", result: { status: "error", level, query: q.query ?? "", message: "query is required", sources: [], source_urls: [] } })
+            return
+          }
+          try {
+            const result =
+              level === "deep_search"
+                ? await deepSearch(query, breadth, topK ?? 5, maxSubQuestions ?? 3, language, onEvent)
+                : await deepLookup(query, topK ?? 5, language, onEvent)
+            send({ type: "result", result })
+          } catch (err) {
+            log.error("TOOL", `research lookup stream (${level}) failed for "${query.slice(0, 80)}"`, err)
+            send({
+              type: "result",
+              result: {
+                status: "error",
+                level,
+                query,
+                message: err instanceof Error ? err.message : String(err),
+                sources: [],
+                source_urls: [],
+              },
+            })
+          }
+        }
+
+        run().finally(() => {
+          try { controller.close() } catch { /* already closed */ }
+        })
+      },
+    })
+
+    return new Response(stream, { headers: set.headers as Record<string, string> })
+  }, {
+    query: t.Object({
+      query: t.String(),
+      level: t.Optional(t.Union([t.Literal("quick"), t.Literal("deep_lookup"), t.Literal("deep_search")])),
+      breadth: t.Optional(t.Union([t.Literal("clue"), t.Literal("topic"), t.Literal("article")])),
+      top_k: t.Optional(t.Union([t.Number(), t.String()])),
+      max_sub_questions: t.Optional(t.Union([t.Number(), t.String()])),
+      language: t.Optional(t.String()),
+      token: t.Optional(t.String()),
     }),
   })

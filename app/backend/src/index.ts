@@ -17,6 +17,7 @@ import { providersRouter } from "./routes/providers"
 import { customProvidersRouter } from "./routes/customProviders"
 import { calibrationRouter } from "./routes/calibration"
 import { researchRouter } from "./routes/research"
+import { authPlugin } from "./middleware/auth"
 import { seedDefaults } from "./db/queries/promptConfigs"
 import { seedDemoTopic } from "./db/seedDemo"
 import { fetchAvailableModels } from "./llm/proxyClient"
@@ -62,6 +63,7 @@ void startModelCatalog()
 const app = new Elysia()
   .use(cors())
   .use(swagger({ path: "/docs" }))
+  .use(authPlugin)
   .use(topicsRouter)
   .use(streamRouter)
   .use(cluesRouter)

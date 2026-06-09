@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import calibration as calibration_api
 from .api import internet as internet_api
+from .api.auth import ApiTokenMiddleware
 from .api import models as models_api
 from .api import pipeline as pipeline_api
 from .api import providers as providers_api
@@ -38,7 +39,15 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title="Dana (Python + DSPy)", version="0.1.0", lifespan=lifespan)
 
-    # Mirrors the TS backend's open CORS (the frontend is same-origin in prod / Vite-proxied in dev).
+    # Env-gated bearer-token auth on /api/* — a no-op unless env DANA_API_TOKEN is set/non-empty
+    # (then /api/* requires `Authorization: Bearer <DANA_API_TOKEN>`; /health, /api/health, and
+    # `?token=` on /stream endpoints are exempt). See api/auth.py. Added FIRST so that CORS (added
+    # next) ends up OUTERMOST — Starlette's add_middleware prepends, so the last-added wraps the
+    # rest. That way CORS still attaches the right headers to the auth 401 and answers preflight.
+    app.add_middleware(ApiTokenMiddleware)
+
+    # Mirrors the TS backend's open CORS (frontend is same-origin in prod / Vite-proxied in dev).
+    # Added LAST → OUTERMOST, so every response (including the auth 401) carries CORS headers.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

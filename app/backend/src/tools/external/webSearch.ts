@@ -12,6 +12,80 @@ export interface SearchResult {
 // SearXNG transient-error retry backoff (ms). Mirrors server-py web_search.py (_BACKOFF).
 const SEARXNG_BACKOFFS = [1000, 3000]
 
+// Tokens too common/short to carry topical signal in title/snippet overlap scoring.
+// Mirrors server-py web_search.py (_STOPWORDS).
+const STOPWORDS: ReadonlySet<string> = new Set([
+  "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "are",
+  "was", "were", "be", "by", "at", "as", "it", "its", "with", "from", "that",
+  "this", "what", "who", "when", "where", "why", "how", "did", "do", "does",
+  "vs", "versus", "about", "into", "over", "after", "before",
+])
+// Wikipedia language-subdomain pattern, e.g. "sv.wikipedia.org", "de.m.wikipedia.org".
+const WIKI_LANG_RE = /^([a-z]{2,3})\.(?:m\.)?wikipedia\.org$/i
+const WORD_RE = /[a-z0-9]+/gi
+
+// Lowercased, stopword-stripped, ≥3-char content tokens of a string.
+function terms(text: string): Set<string> {
+  const out = new Set<string>()
+  for (const m of text.toLowerCase().matchAll(WORD_RE)) {
+    if (m[0].length >= 3 && !STOPWORDS.has(m[0])) out.add(m[0])
+  }
+  return out
+}
+
+function hostOf(url: string): string {
+  const m = /^https?:\/\/([^/?#]+)/i.exec(url || "")
+  return (m ? m[1] : "").toLowerCase()
+}
+
+function intersectionSize(a: Set<string>, b: Set<string>): number {
+  let n = 0
+  for (const x of a) if (b.has(x)) n++
+  return n
+}
+
+// Pure, deterministic post-filter over already-fetched results (NO network).
+// Mirrors server-py web_search.py rerank_results: scores each hit by query-term overlap in its
+// title/snippet and applies penalties to obviously-generic or off-topic hits (bare-entity titles
+// with no query overlap; non-`lang` Wikipedia language editions when a bias is requested).
+// Stable: equal scores keep the engine's original order.
+export function rerankResults(query: string, results: SearchResult[], lang?: string): SearchResult[] {
+  if (results.length === 0) return results
+  const qterms = terms(query)
+  const bias = (lang || "").trim().toLowerCase() || undefined
+
+  const score = (res: SearchResult): number => {
+    const tterms = terms((res.title || "").trim())
+    const sterms = terms(res.snippet || "")
+    let s = 0
+    if (qterms.size > 0) {
+      // Title overlap counts double — it's the strongest topicality signal.
+      s += (2.0 * intersectionSize(qterms, tterms)) / qterms.size
+      s += (1.0 * intersectionSize(qterms, sterms)) / qterms.size
+      const titleOverlap = intersectionSize(qterms, tterms) > 0
+      const snippetOverlap = intersectionSize(qterms, sterms) > 0
+      // Bare-entity title: short, with zero query-term overlap (e.g. generic "Israel").
+      if (tterms.size > 0 && !titleOverlap && tterms.size <= 2) {
+        s -= 1.5
+      } else if (!titleOverlap && !snippetOverlap) {
+        s -= 0.5  // title AND snippet both miss every query term
+      }
+    }
+    // Language bias: demote foreign-language Wikipedia editions when a bias is set.
+    if (bias) {
+      const m = WIKI_LANG_RE.exec(hostOf(res.url))
+      if (m && m[1].toLowerCase() !== bias) s -= 2.0
+    }
+    return s
+  }
+
+  // Stable sort: decorate with original index so equal scores keep engine order.
+  return results
+    .map((res, idx) => ({ res, idx, s: score(res) }))
+    .sort((a, b) => (b.s - a.s) || (a.idx - b.idx))
+    .map(({ res }) => res)
+}
+
 // Failure-tolerant search (⇄ server-py tools/web_search.py): SearXNG is the primary path. Its
 // per-engine CAPTCHA/403 noise (DuckDuckGo etc.) still leaves results from the engines that
 // answered, so a 200 with empty/partial results is a VALID answer, not a failure — we return it
@@ -25,12 +99,15 @@ export async function webSearch(
   language?: string,
 ): Promise<SearchResult[]> {
   const searxngUrl = process.env.SEARXNG_URL || "http://searxng:8080"
+  // Optional english/lang bias for re-ranking only (default unset = no bias = old behavior).
+  // Mirrors server-py web_search.py (DANA_SEARCH_LANG).
+  const rankLang = (process.env.DANA_SEARCH_LANG || "").trim().toLowerCase() || undefined
 
   let lastError: unknown
   for (let attempt = 0; attempt <= SEARXNG_BACKOFFS.length; attempt++) {
     try {
       // 200 → results (possibly empty) is success; return without falling back.
-      return filterSources(await searchWithSearXNG(searxngUrl, query, numResults, dateFilter, language))
+      return rerankResults(query, filterSources(await searchWithSearXNG(searxngUrl, query, numResults, dateFilter, language)), rankLang)
     } catch (searxngError) {
       lastError = searxngError
       if (attempt < SEARXNG_BACKOFFS.length) {
@@ -41,7 +118,7 @@ export async function webSearch(
 
   log.warn("TOOL", `SearXNG failed after retries (${getErrorMessage(lastError)}); trying Brave once`)
   try {
-    return filterSources(await searchWithBrave(query, numResults))
+    return rerankResults(query, filterSources(await searchWithBrave(query, numResults)), rankLang)
   } catch (braveError) {
     // Tolerant: degrade to an empty result, never abort the research run.
     log.warn("TOOL", `webSearch degraded to empty (SearXNG: ${getErrorMessage(lastError)}; Brave: ${getErrorMessage(braveError)})`)

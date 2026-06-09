@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..db import writers
-from ..rigor.sources import is_valid_source
+from ..rigor.sources import domain_of, is_valid_source
 from ..tools.http_fetch import http_fetch
 from ..tools.web_search import web_search
 
@@ -63,6 +63,7 @@ class DanaRetriever:
 
     def retrieve(self, queries: list[str], persona: str = "") -> list[Information]:
         seen: set[str] = set()
+        seen_domains: set[str] = set()  # dedupe by registrable domain (don't fetch N pages/site)
         out: list[Information] = []
         did_live = False
         for q in queries:
@@ -85,11 +86,18 @@ class DanaRetriever:
                     writers.corpus_store_search(self.topic_id, q, results)
                 except Exception:  # noqa: BLE001
                     results = []
+            # results are already relevance-ranked by web_search.rerank_results (and cached
+            # results were stored post-rank), so iterate as-is — one ranking site, no divergence.
             for r in results[: self.top_k]:
                 url = r.get("url", "")
                 if not url or url in seen or not is_valid_source(url):
                     continue  # skip dupes + known fabrication/spam domains
+                dom = domain_of(url)
+                if dom and dom in seen_domains:
+                    continue  # already have a page from this site — diversify sources
                 seen.add(url)
+                if dom:
+                    seen_domains.add(dom)
                 out.append(
                     Information(
                         url=url,

@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
+import { useResearchStream, type TraceEvent } from "@/hooks/useResearchStream"
 
 type Level = "quick" | "deep_lookup" | "deep_search"
 type Breadth = "clue" | "topic" | "article"
@@ -87,7 +88,30 @@ export function ResearchPage() {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<LookupResponse | null>(null)
 
+  // Live SSE trace for the deep tiers; quick stays a plain POST.
+  const stream = useResearchStream<LookupResponse>()
+
   const activeLevel = LEVELS.find(l => l.value === level)!
+
+  // Plain POST flow — used by the quick tier and as a fallback when streaming is
+  // unavailable or fails before delivering a result.
+  async function runPost(q: string, lvl: Level, br: Breadth): Promise<void> {
+    const body: { query: string; level: Level; breadth?: Breadth } = { query: q, level: lvl }
+    if (lvl === "deep_search") body.breadth = br
+    const res = await fetch("/api/research/lookup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(600_000),
+    })
+    const data: LookupResponse = await res.json().catch(() => ({ status: "error" as const, message: res.statusText }))
+    if (!res.ok || data.status === "error") {
+      setError(data.message || res.statusText || "Research request failed.")
+      setResult(null)
+    } else {
+      setResult(data)
+    }
+  }
 
   async function handleSubmit(e?: React.FormEvent) {
     e?.preventDefault()
@@ -96,21 +120,29 @@ export function ResearchPage() {
     setLoading(true)
     setError(null)
     setResult(null)
+    stream.reset()
     try {
-      const body: { query: string; level: Level; breadth?: Breadth } = { query: q, level }
-      if (level === "deep_search") body.breadth = breadth
-      const res = await fetch("/api/research/lookup", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(600_000),
-      })
-      const data: LookupResponse = await res.json().catch(() => ({ status: "error" as const, message: res.statusText }))
-      if (!res.ok || data.status === "error") {
-        setError(data.message || res.statusText || "Research request failed.")
-        setResult(null)
+      // Deep tiers stream a live trace over SSE; fall back to POST if that fails.
+      if (level === "deep_lookup" || level === "deep_search") {
+        try {
+          const data = await stream.start({
+            query: q,
+            level,
+            breadth: level === "deep_search" ? breadth : undefined,
+          })
+          if (data.status === "error") {
+            setError(data.message || "Research request failed.")
+            setResult(null)
+          } else {
+            setResult(data)
+          }
+        } catch {
+          // EventSource unsupported, errored, or closed without a result — fall back.
+          stream.reset()
+          await runPost(q, level, breadth)
+        }
       } else {
-        setResult(data)
+        await runPost(q, level, breadth)
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -194,11 +226,15 @@ export function ResearchPage() {
         <p className="text-xs text-muted-foreground">{activeLevel.hint}</p>
       </form>
 
-      {loading && (
+      {loading && stream.trace.length === 0 && (
         <div className="flex items-center gap-3 rounded-lg border border-border/70 bg-card/80 p-4 text-sm text-muted-foreground">
           <Loader2 className="size-5 shrink-0 animate-spin" />
           <span>Researching{level !== "quick" ? " — deeper tiers can take from tens of seconds to a few minutes." : "…"}</span>
         </div>
+      )}
+
+      {stream.trace.length > 0 && (
+        <TracePanel trace={stream.trace} active={loading} />
       )}
 
       {error && (
@@ -207,6 +243,41 @@ export function ResearchPage() {
 
       {result && !loading && <ResultView result={result} />}
     </main>
+  )
+}
+
+// Live SSE trace — appends each {"type":"think"|"progress"} event as it streams in.
+function TracePanel({ trace, active }: { trace: TraceEvent[]; active: boolean }) {
+  return (
+    <div className="space-y-2 rounded-lg border border-border/70 bg-card/80 p-4">
+      <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+        {active ? (
+          <Loader2 className="size-4 shrink-0 animate-spin" />
+        ) : (
+          <Telescope className="size-4 shrink-0" />
+        )}
+        <span>Live trace</span>
+      </div>
+      <ol className="space-y-1.5 text-sm">
+        {trace.map((ev, i) => (
+          <li key={i} className="flex items-start gap-2">
+            <span className="mt-0.5 shrink-0 font-mono text-xs leading-5 text-muted-foreground">
+              {ev.type === "think"
+                ? (ev.icon || "•")
+                : ev.pct != null
+                  ? `${Math.round(ev.pct * 100)}%`
+                  : "•"}
+            </span>
+            <span className="min-w-0">
+              <span className="font-medium text-foreground">{ev.label ?? ev.stage ?? ev.type}</span>
+              {(ev.detail || ev.msg) && (
+                <span className="text-muted-foreground"> — {ev.detail ?? ev.msg}</span>
+              )}
+            </span>
+          </li>
+        ))}
+      </ol>
+    </div>
   )
 }
 

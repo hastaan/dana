@@ -11,6 +11,7 @@ transport/5xx errors, and only fall back to the Brave HTML scrape as a genuine l
 never aborts a run.
 """
 import logging
+import os
 import re
 import time
 
@@ -22,22 +23,86 @@ logger = logging.getLogger("dana.web_search")
 _UA = "Mozilla/5.0 (compatible; Dana/1.0; +https://dana.local)"
 _BACKOFF = (1.0, 3.0)  # SearXNG transient-error retries
 
+# Tokens too common/short to carry topical signal in title/snippet overlap scoring.
+_STOPWORDS: frozenset[str] = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "is", "are",
+    "was", "were", "be", "by", "at", "as", "it", "its", "with", "from", "that",
+    "this", "what", "who", "when", "where", "why", "how", "did", "do", "does",
+    "vs", "versus", "about", "into", "over", "after", "before",
+})
+# Wikipedia language-subdomain pattern, e.g. "sv.wikipedia.org", "de.m.wikipedia.org".
+_WIKI_LANG_RE = re.compile(r"^([a-z]{2,3})\.(?:m\.)?wikipedia\.org$", re.I)
+_WORD_RE = re.compile(r"[a-z0-9]+", re.I)
+
+
+def _terms(text: str) -> set[str]:
+    """Lowercased, stopword-stripped, ≥3-char content tokens of a string."""
+    return {t for t in _WORD_RE.findall(text.lower()) if len(t) >= 3 and t not in _STOPWORDS}
+
+
+def _host(url: str) -> str:
+    m = re.match(r"https?://([^/?#]+)", url or "", re.I)
+    return (m.group(1) if m else "").lower()
+
+
+def rerank_results(query: str, results: list[dict], lang: str | None = None) -> list[dict]:
+    """Pure, deterministic post-filter over already-fetched results (NO network).
+
+    Scores each hit by query-term overlap in its title/snippet and applies penalties to
+    obviously-generic or off-topic hits (bare-entity titles with no query overlap;
+    non-`lang` Wikipedia language editions when an english/`lang` bias is requested).
+    Stable: equal scores keep the engine's original order.
+    """
+    qterms = _terms(query)
+    if not results:
+        return results
+    bias = (lang or "").strip().lower() or None
+
+    def score(idx_res: tuple[int, dict]) -> tuple[float, int]:
+        idx, res = idx_res
+        title = (res.get("title") or "").strip()
+        snippet = res.get("snippet") or ""
+        tterms = _terms(title)
+        sterms = _terms(snippet)
+        s = 0.0
+        if qterms:
+            # Title overlap counts double — it's the strongest topicality signal.
+            s += 2.0 * len(qterms & tterms) / len(qterms)
+            s += 1.0 * len(qterms & sterms) / len(qterms)
+            # Bare-entity title: short, with zero query-term overlap (e.g. generic "Israel").
+            if tterms and not (qterms & tterms) and len(tterms) <= 2:
+                s -= 1.5
+            elif not (qterms & tterms) and not (qterms & sterms):
+                s -= 0.5  # title AND snippet both miss every query term
+        # Language bias: demote foreign-language Wikipedia editions when a bias is set.
+        if bias:
+            m = _WIKI_LANG_RE.match(_host(res.get("url", "")))
+            if m and m.group(1).lower() != bias:
+                s -= 2.0
+        return (s, -idx)  # higher score first; original order breaks ties (stable)
+
+    ranked = sorted(enumerate(results), key=score, reverse=True)
+    return [res for _, res in ranked]
+
 
 def web_search(query: str, num_results: int = 5, language: str | None = None) -> list[dict]:
     clean = re.sub(r"site:\S+", "", query, flags=re.I)
     clean = re.sub(r"\s{2,}", " ", clean).strip()
     q = clean or query
+    # Optional english/lang bias for re-ranking only (default unset = no bias = old behavior).
+    rank_lang = (os.getenv("DANA_SEARCH_LANG") or "").strip().lower() or None
     last_err: Exception | None = None
     for attempt in range(len(_BACKOFF) + 1):
         try:
-            return _searxng(q, num_results, language)  # 200 → results (possibly empty) is success
+            # 200 → results (possibly empty) is success
+            return rerank_results(q, _searxng(q, num_results, language), rank_lang)
         except Exception as e:  # noqa: BLE001
             last_err = e
             if attempt < len(_BACKOFF):
                 time.sleep(_BACKOFF[attempt])
     logger.warning("SearXNG failed after retries (%s); trying Brave once", last_err)
     try:
-        return _brave(query, num_results)
+        return rerank_results(q, _brave(query, num_results), rank_lang)
     except Exception as brave_err:  # noqa: BLE001
         logger.warning("web_search degraded to empty (SearXNG: %s; Brave: %s)", last_err, brave_err)
         return []  # tolerant: empty result, never abort the research run
