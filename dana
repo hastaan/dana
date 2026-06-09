@@ -19,6 +19,33 @@ PORT="${PORT:-3000}"
 
 dc() { (cd "$DANA_DIR" && docker compose "$@"); }
 
+# localfirecrawl (opt-in, heavy) — driven from its thin wrapper compose, which
+# `include:`s the upstream stack from the clone at firecrawl/localfirecrawl/.
+FIRECRAWL_DIR="$DANA_DIR/firecrawl"
+fc() { (cd "$DANA_DIR" && docker compose -f "$FIRECRAWL_DIR/docker-compose.yml" "$@"); }
+
+firecrawl() {
+  local clone="$FIRECRAWL_DIR/localfirecrawl"
+  if [ ! -d "$clone/.git" ]; then
+    echo "Cloning localfirecrawl into $clone …"
+    git clone https://github.com/teelaitila/localfirecrawl "$clone"
+  fi
+  # localfirecrawl reads its config (incl. PORT=3002) from its own .env; seed it
+  # from .env.example on first run, generating a SearXNG secret if openssl is here.
+  if [ ! -f "$clone/.env" ] && [ -f "$clone/.env.example" ]; then
+    echo "Seeding $clone/.env from .env.example (PORT=3002) …"
+    cp "$clone/.env.example" "$clone/.env"
+    if command -v openssl >/dev/null 2>&1; then
+      local secret; secret="$(openssl rand -hex 32)"
+      sed -i "s/^SEARXNG_SECRET_KEY=.*/SEARXNG_SECRET_KEY=$secret/" "$clone/.env" 2>/dev/null || true
+    fi
+  fi
+  echo "Building + starting localfirecrawl (Firecrawl api → http://localhost:3002). First build is SLOW…"
+  fc up -d --build "$@"
+  echo "localfirecrawl → http://localhost:3002   (\`dana firecrawl-logs\` to watch · \`dana firecrawl-stop\` to stop)"
+  echo "Dana uses it automatically via FIRECRAWL_URL=http://host.docker.internal:3002."
+}
+
 usage() {
   cat <<EOF
 dana — control the Dana app  (http://localhost:$PORT)
@@ -34,6 +61,11 @@ Lifecycle (Docker):
   status         Show service status                    (docker compose ps)
   logs [svc]     Follow logs (optionally one service)   (docker compose logs -f)
   shell          Open a shell inside the app container
+
+Playwright-grade fetch (opt-in, no API key — HEAVY build-from-source):
+  firecrawl      Clone+build+start localfirecrawl (Firecrawl api on :3002)
+  firecrawl-stop Stop and remove the localfirecrawl stack
+  firecrawl-logs Follow localfirecrawl logs (watch the slow first build)
 
 Local development (needs Bun + a proxy on :8317):
   dev            Run backend (:$PORT) + frontend dev server (:5173)
@@ -78,6 +110,9 @@ case "$cmd" in
   status|ps)      dc ps "$@" ;;
   logs)           dc logs -f "$@" ;;
   shell|sh)       dc exec dana sh ;;
+  firecrawl)         firecrawl "$@" ;;
+  firecrawl-stop)    fc down "$@" ;;
+  firecrawl-logs)    fc logs -f "$@" ;;
   update)         ( cd "$DANA_DIR" && git pull --ff-only ) && dc build && dc up -d && echo "Updated → http://localhost:$PORT" ;;
   dev)            dev ;;
   link)           link ;;

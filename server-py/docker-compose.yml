@@ -15,6 +15,11 @@ services:
       PROXY_BASE_URL: ${PROXY_BASE_URL:-http://host.docker.internal:8317}
       SEARXNG_URL: http://searxng:8080
       MANAGEMENT_SECRET: ${MANAGEMENT_SECRET:-}
+      # Playwright-grade fetch via the opt-in `dana firecrawl` (localfirecrawl) stack,
+      # reached through the host on port 3002 (see extra_hosts host-gateway below).
+      # Used automatically once that stack is up; otherwise fetches fall back to
+      # trafilatura/Jina/raw. Override in .env to relocate it.
+      FIRECRAWL_URL: ${FIRECRAWL_URL:-http://host.docker.internal:3002}
       # Optional full cutover: serve the built React SPA from this process.
       FRONTEND_DIST: ${FRONTEND_DIST:-}
     ports:

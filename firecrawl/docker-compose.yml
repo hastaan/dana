@@ -1,0 +1,23 @@
+# localfirecrawl — OPT-IN Playwright-grade fetch for Dana (no API key).
+#
+#   dana firecrawl          # clone (if needed) + build + up -d   (HEAVY first build)
+#   dana firecrawl-logs
+#   dana firecrawl-stop
+#
+# This is a THIN wrapper that builds/runs the upstream localfirecrawl stack from a
+# clone at ./localfirecrawl/ (Tor proxies + playwright-service + Firecrawl `api` +
+# `worker` + valkey/redis + its own searxng). We do NOT vendor or fork it — the
+# `include:` below pulls in localfirecrawl's own compose verbatim so service
+# definitions, build contexts and deps stay in sync with upstream.
+#
+# The Firecrawl-compatible REST API (incl. POST /v1/scrape) is published by the
+# upstream `api` service on host port ${PORT} (default 3002, set in the clone's
+# .env — `dana firecrawl` seeds it). Dana reaches it OFF its own network, via the
+# host, at FIRECRAWL_URL=http://host.docker.internal:3002 (already pre-wired into
+# the dana service in the root + server-py compose). No shared Docker network is
+# required: Dana → host:3002 → localfirecrawl `api`.
+include:
+  - path: ./localfirecrawl/docker-compose.yml
+    # localfirecrawl reads PORT / SEARXNG_SECRET_KEY etc. from its own .env, which
+    # `dana firecrawl` creates from .env.example (PORT=3002) on first run.
+    env_file: ./localfirecrawl/.env

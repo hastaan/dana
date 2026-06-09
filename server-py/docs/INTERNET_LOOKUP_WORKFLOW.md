@@ -24,23 +24,36 @@ separate strip-think proxy process, the heavyweight `gpt-researcher` package, ng
   synthesized-output caching. Party discovery is now grounded via `deep_search(breadth=topic)`.
 
 **Remaining / optional:**
-- localfirecrawl fetch (set `FIRECRAWL_URL`).
+- localfirecrawl fetch — now an opt-in `dana firecrawl` profile, `FIRECRAWL_URL` pre-wired (see below).
 - frontend UI for `/api/research/lookup`.
 - DSPy optimization (deferred — no resolved-forecast data yet).
 
 ---
 
-## localfirecrawl (optional, no API key)
+## localfirecrawl (opt-in profile, no API key)
 
 Both backends **already** call `FIRECRAWL_URL` → `/v1/scrape` when it is set
 (`app/backend/src/tools/external/httpFetch.ts` and
 `server-py/src/dana/tools/http_fetch.py`); it sits first in the fetch chain and failures fall
 through to the existing fallbacks. No code changes are needed to use it.
 
-To enable a Playwright-grade fetch with **no API key**, run
-[localfirecrawl](https://github.com/teelaitila/localfirecrawl) separately and point Dana at it
-by setting `FIRECRAWL_URL` (e.g. `http://host.docker.internal:3002`) in `docker-compose`/`.env`.
-It is a heavy Chromium stack, so run it **on demand** rather than leaving it up.
+For a Playwright-grade fetch with **no API key**, [localfirecrawl](https://github.com/teelaitila/localfirecrawl)
+is now an **opt-in `dana firecrawl` profile** (it is **not** part of `dana start`):
+
+```bash
+dana firecrawl        # clone + build + start localfirecrawl  (HEAVY build-from-source)
+dana firecrawl-logs   # follow logs (watch the slow first build)
+dana firecrawl-stop   # stop + remove the stack
+```
+
+It is a heavy build-from-source stack (Tor proxies + a Chromium `playwright-service` + the
+Firecrawl `api`/`worker` + valkey/redis + its own SearXNG), so the **first run is slow**
+(compiles the api/worker and pulls Chromium); later starts are fast. The Firecrawl REST API
+(incl. `POST /v1/scrape`) is published on **host port `3002`**, and `FIRECRAWL_URL` is
+**pre-wired** to `http://host.docker.internal:3002` in the root `docker-compose.yml` and
+`server-py/docker-compose.yml` (with a `host-gateway` `extra_hosts` entry), so Dana uses it
+automatically once it is up — no `.env` edit required (override `FIRECRAWL_URL` to relocate it).
+The wrapper compose lives at `firecrawl/docker-compose.yml`; see `firecrawl/README.md`.
 
 ---
 
@@ -243,7 +256,7 @@ OPENAI_LIKE_BASE_URL=https://api.minimax.io/v1
 ANTHROPIC_LIKE_BASE_URL=https://api.minimax.io/anthropic
 # Engines (already running)
 SEARXNG_URL=http://searxng:8080
-FIRECRAWL_URL=                        # set to enable Playwright-grade fetch (localfirecrawl)
+FIRECRAWL_URL=                        # pre-wired to host:3002 in compose; `dana firecrawl` to start localfirecrawl
 # Tier knobs (defaults; overridable per call / via analysis_controls)
 DANA_DEEP_SEARCH_MAX_PERSPECTIVE=3
 DANA_DEEP_SEARCH_TOP_K=5

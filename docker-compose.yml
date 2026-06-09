@@ -7,10 +7,12 @@ services:
       SEARXNG_URL: http://searxng:8080
       # Optional: point at a running localfirecrawl / Firecrawl self-host for
       # Playwright-rendered page fetches (unlocks JS-heavy & paywalled sources).
-      # localfirecrawl is a heavy separate stack (Chromium + redis + worker), so it
-      # is NOT bundled here — run it separately and set FIRECRAWL_URL to reach it,
-      # e.g. http://host.docker.internal:3002. Unset → fetches use Jina/Readability.
-      FIRECRAWL_URL: ${FIRECRAWL_URL:-}
+      # localfirecrawl is a heavy opt-in stack (Chromium + redis + worker), so it
+      # is NOT bundled here — start it on demand with `dana firecrawl`. The default
+      # below reaches that stack's Firecrawl api on host port 3002 via host-gateway,
+      # so fetches use it automatically once it's up; otherwise the call fails fast
+      # and fetches fall back to Jina/Readability. Override in .env to relocate it.
+      FIRECRAWL_URL: ${FIRECRAWL_URL:-http://host.docker.internal:3002}
       FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
     ports:
       - "3000:3000"
@@ -18,6 +20,10 @@ services:
       - "1455:1455"
     volumes:
       - ./data:/data
+    extra_hosts:
+      # so FIRECRAWL_URL=host.docker.internal:3002 resolves to the host on Linux,
+      # reaching the opt-in `dana firecrawl` (localfirecrawl) stack.
+      - "host.docker.internal:host-gateway"
     depends_on:
       searxng:
         condition: service_started
