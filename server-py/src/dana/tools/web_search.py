@@ -22,6 +22,7 @@ from ..config import settings
 logger = logging.getLogger("dana.web_search")
 _UA = "Mozilla/5.0 (compatible; Dana/1.0; +https://dana.local)"
 _BACKOFF = (1.0, 3.0)  # SearXNG transient-error retries
+_EMPTY_RETRIES = 2     # extra re-queries when a 200 yields ZERO hits (Tor exit rotation)
 
 # Tokens too common/short to carry topical signal in title/snippet overlap scoring.
 _STOPWORDS: frozenset[str] = frozenset({
@@ -134,21 +135,34 @@ def web_search(query: str, num_results: int = 5, language: str | None = None) ->
     q = clean or query
     # Optional english/lang bias for re-ranking only (default unset = no bias = old behavior).
     rank_lang = (os.getenv("DANA_SEARCH_LANG") or "").strip().lower() or None
-    last_err: Exception | None = None
-    for attempt in range(len(_BACKOFF) + 1):
+
+    def _attempt() -> list[dict]:
+        """One SearXNG pass with transient-error backoff + a Brave HTML last resort."""
+        last_err: Exception | None = None
+        for attempt in range(len(_BACKOFF) + 1):
+            try:
+                return rerank_results(q, _searxng(q, num_results, language), rank_lang)
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if attempt < len(_BACKOFF):
+                    time.sleep(_BACKOFF[attempt])
+        logger.warning("SearXNG failed after retries (%s); trying Brave once", last_err)
         try:
-            # 200 → results (possibly empty) is success
-            return rerank_results(q, _searxng(q, num_results, language), rank_lang)
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            if attempt < len(_BACKOFF):
-                time.sleep(_BACKOFF[attempt])
-    logger.warning("SearXNG failed after retries (%s); trying Brave once", last_err)
-    try:
-        return rerank_results(q, _brave(query, num_results), rank_lang)
-    except Exception as brave_err:  # noqa: BLE001
-        logger.warning("web_search degraded to empty (SearXNG: %s; Brave: %s)", last_err, brave_err)
-        return []  # tolerant: empty result, never abort the research run
+            return rerank_results(q, _brave(query, num_results), rank_lang)
+        except Exception as brave_err:  # noqa: BLE001
+            logger.warning("web_search degraded to empty (SearXNG: %s; Brave: %s)", last_err, brave_err)
+            return []  # tolerant: empty result, never abort the research run
+
+    # When SearXNG is reached through Tor (outgoing.proxies), a 200 with ZERO hits is usually a
+    # blocked/slow exit rather than a truly resultless query — re-querying rotates to a fresh
+    # circuit. We retry a bounded number of times on empty; a genuinely resultless query still
+    # ends empty (honest), it just costs a couple of extra fast passes first.
+    out = _attempt()
+    for _ in range(_EMPTY_RETRIES):
+        if out:
+            break
+        out = _attempt()
+    return out
 
 
 def _searxng(query: str, num_results: int, language: str | None) -> list[dict]:

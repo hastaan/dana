@@ -41,27 +41,25 @@ services:
     depends_on:
       tor1:
         condition: service_started
-      tor2:
-        condition: service_started
-      tor3:
-        condition: service_started
     networks:
       - dana-net
 
   # Tor SOCKS5 proxies (:9050) — SearXNG routes every engine request through them (see
   # searxng/settings.yml `outgoing.proxies`) so engines see rotating Tor exit IPs, not this
-  # host's blocked datacenter IP. Three instances give exit-IP diversity: SearXNG rotates
-  # across them per request, so a sub-query landing on a blocked exit is the exception, not
-  # the rule. Same image + 3-proxy pattern localfirecrawl uses for its egress.
+  # host's blocked datacenter IP. Search engines block MANY Tor exits, so we run a POOL:
+  # SearXNG rotates across them, and web_search retries on empty — the more exits, the lower
+  # the odds that every exit a query touches is simultaneously blocked. Same image
+  # localfirecrawl uses for its egress.
   tor1: &tor
     image: dperson/torproxy
     restart: unless-stopped
     networks:
       - dana-net
-  tor2:
-    <<: *tor
-  tor3:
-    <<: *tor
+  tor2: {<<: *tor}
+  tor3: {<<: *tor}
+  tor4: {<<: *tor}
+  tor5: {<<: *tor}
+  tor6: {<<: *tor}
 
 networks:
   dana-net:
