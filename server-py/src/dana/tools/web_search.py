@@ -52,11 +52,25 @@ def rerank_results(query: str, results: list[dict], lang: str | None = None) -> 
     obviously-generic or off-topic hits (bare-entity titles with no query overlap;
     non-`lang` Wikipedia language editions when an english/`lang` bias is requested).
     Stable: equal scores keep the engine's original order.
+
+    Relevance FLOOR: for a query with ≥2 content terms, results that share NO term with the
+    query in either title or snippet are dropped — this kills the nonsense an upstream scraper
+    sometimes returns (e.g. bing's anti-bot fallback serving "Boots"/Chrome-help links for an
+    Iran query). If every result is off-topic we return [] (an honest "no results") rather than
+    surface junk. Single-term queries skip the floor (snippets are often sparse).
     """
     qterms = _terms(query)
     if not results:
         return results
     bias = (lang or "").strip().lower() or None
+
+    if len(qterms) >= 2:
+        def _overlaps(res: dict) -> bool:
+            return bool(qterms & (_terms(res.get("title") or "") | _terms(res.get("snippet") or "")))
+        on_topic = [r for r in results if _overlaps(r)]
+        results = on_topic  # all-junk → [] (honest empty, not nonsense)
+        if not results:
+            return []
 
     def score(idx_res: tuple[int, dict]) -> tuple[float, int]:
         idx, res = idx_res

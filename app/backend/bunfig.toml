@@ -1,5 +1,0 @@
-# Test harness wiring. `preload` runs tests/setup.ts ONCE before any test file, which forces
-# DATA_DIR to a temp dir and opens a throwaway SQLite DB so DB-dependent tests don't fail with
-# "Database not initialized". See tests/setup.ts for the seed/reset helpers.
-[test]
-preload = ["./tests/setup.ts"]

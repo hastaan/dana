@@ -13,3 +13,5 @@ app/frontend/dist/
 /.claude
 /docs
 firecrawl/localfirecrawl/
+# Source-material archives (deep-research/internet-lookup references), not project files.
+*.zip

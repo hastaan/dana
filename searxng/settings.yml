@@ -1,20 +1,20 @@
 # SearXNG config for Dana's JSON-API use.
 #
-# Evidence-based engine set: from a server/datacenter IP, google + bing return results cleanly
-# (they never error), while duckduckgo/qwant/brave/startpage/mojeek + the default aol/karmasearch/
-# wikidata/onion engines only CAPTCHA / 403 / disconnect and FLOOD the logs while contributing
-# nothing. So we keep ONLY the engines that actually work and force-enable them. This is not the
-# "narrowing" that broke results before (that failure was keep_only NOT enabling default-disabled
-# engines like bing) — here we keep_only AND explicitly enable, and google+bing were already doing
-# all the real work. Net: same results, quiet logs.
-#
-# keep_only restricts the (large) default engine set to this whitelist; the engines: block then
-# force-enables them (bing/wikipedia ship disabled-by-default, so this is required).
+# BROAD engine set for coverage: from a server IP no single engine is reliable (google blocks,
+# bing intermittently serves anti-bot fallback junk, others CAPTCHA/403), so breadth maximizes
+# the chance that SOME engine returns relevant hits. Dana's web_search is failure-tolerant AND
+# applies a relevance FLOOR (drops zero-query-overlap junk), so the breadth costs only some log
+# noise — never nonsense results. DuckDuckGo is omitted: from a datacenter IP it only emits
+# CAPTCHA tracebacks (0 results) and is the loudest log spammer.
 use_default_settings:
   engines:
     keep_only:
       - google
       - bing
+      - brave
+      - startpage
+      - qwant
+      - mojeek
       - wikipedia
 
 search:
@@ -28,15 +28,10 @@ server:
   secret_key: "4ced9d1ff16fbce79a94aea9c729277b6f755f02c68fd973"
 
 engines:
-  - name: google
-    engine: google
-    disabled: false
-    shortcut: g
-  - name: bing
-    engine: bing
-    disabled: false
-    shortcut: bi
-  - name: wikipedia
-    engine: wikipedia
-    disabled: false
-    shortcut: wp
+  - {name: google, engine: google, disabled: false, shortcut: g}
+  - {name: bing, engine: bing, disabled: false, shortcut: bi}
+  - {name: brave, engine: brave, disabled: false, shortcut: br}
+  - {name: startpage, engine: startpage, disabled: false, shortcut: sp}
+  - {name: qwant, engine: qwant, disabled: false, shortcut: qw}
+  - {name: mojeek, engine: mojeek, disabled: false, shortcut: mj}
+  - {name: wikipedia, engine: wikipedia, disabled: false, shortcut: wp}

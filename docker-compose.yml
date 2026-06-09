@@ -1,28 +1,28 @@
 services:
+  # The app: Python (FastAPI/DSPy) backend + bundled CLIProxyAPI + the built React SPA, all in
+  # one container on :3000. (The TS backend has been retired — see server-py/docs/CUTOVER.md.)
   dana:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: server-py/Dockerfile
     environment:
+      PORT: 3000
+      DATA_DIR: /data
       SEARXNG_URL: http://searxng:8080
-      # Optional: point at a running localfirecrawl / Firecrawl self-host for
-      # Playwright-rendered page fetches (unlocks JS-heavy & paywalled sources).
-      # localfirecrawl is a heavy opt-in stack (Chromium + redis + worker), so it
-      # is NOT bundled here — start it on demand with `dana firecrawl`. The default
-      # below reaches that stack's Firecrawl api on host port 3002 via host-gateway,
-      # so fetches use it automatically once it's up; otherwise the call fails fast
-      # and fetches fall back to Jina/Readability. Override in .env to relocate it.
+      # CLIProxyAPI runs inside this container; PROXY_BASE_URL defaults to 127.0.0.1:8317
+      # (set in the Dockerfile). MANAGEMENT_SECRET is generated/persisted by the entrypoint
+      # to /data/.management-secret unless provided here.
+      MANAGEMENT_SECRET: ${MANAGEMENT_SECRET:-}
+      # Playwright-grade fetch via the opt-in `dana firecrawl` stack (host :3002); used
+      # automatically once it's up, otherwise fetches fall back to trafilatura/Jina.
       FIRECRAWL_URL: ${FIRECRAWL_URL:-http://host.docker.internal:3002}
-      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
     ports:
       - "3000:3000"
-      - "54545:54545"
-      - "1455:1455"
+      - "54545:54545"   # CLIProxyAPI OAuth callback
+      - "1455:1455"     # CLIProxyAPI OAuth callback
     volumes:
       - ./data:/data
     extra_hosts:
-      # so FIRECRAWL_URL=host.docker.internal:3002 resolves to the host on Linux,
-      # reaching the opt-in `dana firecrawl` (localfirecrawl) stack.
       - "host.docker.internal:host-gateway"
     depends_on:
       searxng:
@@ -37,51 +37,6 @@ services:
       - "8080:8080"
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
-    restart: unless-stopped
-    networks:
-      - dana-net
-
-  # ── Opt-in: run the Python (FastAPI/DSPy) backend AS the served app ──────────
-  # The cutover candidate (see server-py/docs/CUTOVER.md). Gated behind the
-  # `pyserve` profile so a plain `docker compose up` is UNCHANGED — this service
-  # only starts with `docker compose --profile pyserve up` (or `dana pyserve`).
-  # It serves on :3001 and, when FRONTEND_DIST points at a built SPA, serves the
-  # React app itself (main.py mounts the static SPA LAST so /api/* still wins),
-  # so the whole app runs on the Python backend with no TS container.
-  server-py:
-    profiles: ["pyserve"]
-    build:
-      context: ./server-py
-      dockerfile: Dockerfile
-    environment:
-      PORT: 3001
-      DATA_DIR: /data
-      # CLIProxyAPI: reuse the root `dana` container's proxy on the shared net by
-      # default; override PROXY_BASE_URL in .env to point elsewhere (e.g. host).
-      PROXY_BASE_URL: ${PROXY_BASE_URL:-http://dana:8317}
-      SEARXNG_URL: http://searxng:8080
-      MANAGEMENT_SECRET: ${MANAGEMENT_SECRET:-}
-      FIRECRAWL_URL: ${FIRECRAWL_URL:-http://host.docker.internal:3002}
-      # Serve the built React SPA from this process. `dana pyserve` builds the SPA
-      # into app/frontend/dist and mounts it at /app/frontend-dist (below), so the
-      # default points there; override to relocate.
-      FRONTEND_DIST: ${FRONTEND_DIST:-/app/frontend-dist}
-    ports:
-      - "3001:3001"
-    volumes:
-      # A COPY of the DB, never the live shared ./data while the TS backend runs
-      # (SQLite is single-writer — see CUTOVER.md "Shared dana.db" risk).
-      - ./server-py/data:/data
-      # The built SPA, read-only, so server-py can serve it via FRONTEND_DIST.
-      - ./app/frontend/dist:/app/frontend-dist:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    depends_on:
-      searxng:
-        condition: service_started
-      # The `dana` container hosts CLIProxyAPI (server-py reaches it at dana:8317 above).
-      dana:
-        condition: service_started
     restart: unless-stopped
     networks:
       - dana-net
