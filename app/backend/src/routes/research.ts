@@ -7,7 +7,7 @@
 //   deep_search  → ~3 bounded angles → fetch (capped) → ONE markdown briefing ({ content, ... }).
 //
 // Everything is deliberately bounded so it never hammers SearXNG: quick ≤1 search,
-// deep_lookup ≤1 search, deep_search ≤3 searches.
+// deep_lookup ≤3 searches (raw query + keyword sub-queries), deep_search ≤3 searches.
 import { Elysia, t } from "elysia"
 import { webSearch, type SearchResult } from "../tools/external/webSearch"
 import { httpFetch } from "../tools/external/httpFetch"
@@ -102,7 +102,19 @@ async function quick(query: string, topK: number, language?: string) {
 
 // ── deep_lookup ──────────────────────────────────────────────────────────────────
 async function deepLookup(query: string, topK: number, language?: string) {
-  const hits = await webSearch(query, topK, undefined, language)
+  // Search the raw query AND keyword sub-queries, then aggregate: the raw query guarantees we
+  // never do worse than a direct search, while keyword sub-queries (buildSubQueries) add
+  // coverage for natural-language questions (a verbatim "what caused…" can match thesaurus
+  // pages). De-duped; ≤3 searches total.
+  const subs = [...new Set([query, ...(await buildSubQueries(query, 2))])].slice(0, 3)
+  const seen = new Set<string>()
+  const hits: SearchResult[] = []
+  for (const sub of subs) {
+    for (const h of await webSearch(sub, topK, undefined, language)) {
+      if (!seen.has(h.url)) { seen.add(h.url); hits.push(h) }
+    }
+    if (hits.length >= topK) break
+  }
   if (hits.length === 0) {
     // No evidence → do NOT fabricate.
     return {
