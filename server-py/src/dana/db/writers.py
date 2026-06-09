@@ -106,13 +106,21 @@ def set_parties(topic_id: str, parties: list[dict]) -> None:
     """Replace the topic's parties (⇄ dbSetParties)."""
     with connect() as c:
         c.execute("DELETE FROM parties WHERE topic_id=?", (topic_id,))
+        seen_ids: set[str] = set()  # backstop: slugify truncates → dup ids would crash PRIMARY KEY
         for p in parties:
+            pid = p.get("id") or slugify(p.get("name", "x"))
+            if pid in seen_ids:
+                n = 2
+                while f"{pid}-{n}" in seen_ids:
+                    n += 1
+                pid = f"{pid}-{n}"
+            seen_ids.add(pid)
             c.execute(
                 "INSERT INTO parties (id,topic_id,name,type,description,weight,weight_factors,weight_evidence,"
                 "agenda,means,circle,stance,vulnerabilities,auto_discovered,user_verified)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    p["id"], topic_id, p["name"], p.get("type", "non_state"), p.get("description", ""),
+                    pid, topic_id, p["name"], p.get("type", "non_state"), p.get("description", ""),
                     p.get("weight", 0),
                     json.dumps(p.get("weight_factors", {})), json.dumps(p.get("weight_evidence", {})),
                     p.get("agenda", ""), json.dumps(p.get("means", [])),

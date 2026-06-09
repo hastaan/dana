@@ -35,7 +35,12 @@ import os
 
 @dataclass
 class ResearchConfig:
+    # `max_personas` bounds CONVERSATION breadth (how many actors we interview the web about) —
+    # this is the performance knob. `max_parties` is decoupled and larger so the discovered set
+    # can hold internal factions + external state actors + named alliances WITHOUT the 5-cap
+    # squeezing external players out (the TS era had no discovery-time party cap).
     max_personas: int = field(default_factory=lambda: int(os.getenv("DANA_RESEARCH_MAX_PERSONAS", "5")))
+    max_parties: int = field(default_factory=lambda: int(os.getenv("DANA_RESEARCH_MAX_PARTIES", "12")))
     max_turns: int = field(default_factory=lambda: int(os.getenv("DANA_RESEARCH_MAX_TURNS", "3")))
     top_k: int = field(default_factory=lambda: int(os.getenv("DANA_RESEARCH_TOP_K", "4")))
     max_searches: int = field(default_factory=lambda: int(os.getenv("DANA_RESEARCH_MAX_SEARCHES", "24")))
@@ -76,6 +81,20 @@ class StormResearchEngine:
         self.ask = dspy.ChainOfThought(sig.AskAsPersona)
         self.researcher = GroundedResearcher(self.retriever)
         self.distill = dspy.ChainOfThought(sig.DistillClues)
+        self.refine = dspy.ChainOfThought(sig.RefineParties)
+        self._used_ids: set[str] = set()  # guarantees unique party ids (slugify truncates to 30 → collisions)
+
+    def _uid(self, name: str) -> str:
+        """Unique party id from a name. writers.slugify truncates to 30 chars, so two verbose
+        party names sharing a prefix collide → identical ids → set_parties IntegrityError aborts
+        the whole discovery persist. Suffix -2/-3 on collision so every party id is distinct."""
+        base = writers.slugify(name)
+        pid, n = base, 2
+        while pid in self._used_ids:
+            pid = f"{base}-{n}"
+            n += 1
+        self._used_ids.add(pid)
+        return pid
 
     # ── Phase 0: ground party-finding in real web evidence (workflow: discovery → deep research) ──
     def _ground_topic(self, topic: str, emit: Emit) -> str:
@@ -89,12 +108,17 @@ class StormResearchEngine:
         it LAZILY to avoid a circular import at module load."""
         if os.getenv("DANA_GROUND_DISCOVERY", "1") == "0":
             return ""
-        gp = int(os.getenv("DANA_GROUND_PERSONAS", "2"))
+        # Default 3 grounding angles so one each can target internal factions, EXTERNAL state
+        # actors, and the adversarial/conflict dimension — costs only ~6-8 more searches than the
+        # old 2×2 and stays well under discovery's own 24-search budget (separate budget).
+        gp = int(os.getenv("DANA_GROUND_PERSONAS", "3"))
         gt = int(os.getenv("DANA_GROUND_TURNS", "2"))
         try:
             from .deep_search import deep_search  # lazy: deep_search imports engine
+            # geopolitical=True swaps the generic angle generator for the adversarial/external-
+            # actor + recency-aware one so external players are guaranteed to be queried for.
             res = deep_search(topic, breadth="topic", topic_id=self.topic_id, emit=emit,
-                              max_personas=gp, max_turns=gt, top_k=self.cfg.top_k)
+                              max_personas=gp, max_turns=gt, top_k=self.cfg.top_k, geopolitical=True)
         except Exception:  # noqa: BLE001
             return ""
         briefing = (res.get("content") or "").strip() if isinstance(res, dict) else ""
@@ -113,20 +137,25 @@ class StormResearchEngine:
         emit({"type": "think", "icon": "🧭", "label": "Surveying analogous cases", "detail": topic[:60]})
         analogues = self.survey(topic=topic, description=desc, today=today).analogues
         seeded = self.seed(topic=topic, description=desc, analogues=analogues)
-        personas: list[Persona] = []
+        # Party set is bounded by max_parties (large) so external actors + alliances survive;
+        # conversation breadth is bounded SEPARATELY by max_personas (the perf knob) below.
+        party_personas: list[Persona] = []
         parties: list[dict] = []
-        for p in seeded.parties[: self.cfg.max_personas]:
-            pid = writers.slugify(p.name)
+        for p in seeded.parties[: self.cfg.max_parties]:
+            pid = self._uid(p.name)
+            circle = {"visible": list(p.member_names), "shadow": []} if p.type == "alliance" else {"visible": [], "shadow": []}
             parties.append({
                 "id": pid, "name": p.name, "type": p.type, "description": p.why,
                 "agenda": p.agenda, "weight": 0, "stance": "active", "auto_discovered": True,
+                "circle": circle,
             })
-            personas.append(Persona("party", p.name, p.agenda or p.why, ptype=p.type, party_id=pid))
-        for lens in seeded.lenses:
-            personas.append(Persona("lens", lens.name, lens.focus))
+            party_personas.append(Persona("party", p.name, p.agenda or p.why, ptype=p.type, party_id=pid))
+        lens_personas = [Persona("lens", lens.name, lens.focus) for lens in seeded.lenses]
+        # Interview the most salient parties first, then lenses, capped to max_personas for perf.
+        personas = (party_personas + lens_personas)[: self.cfg.max_personas]
         emit({"type": "think", "icon": "🎭", "label": f"{len(parties)} parties, {len(seeded.lenses)} lenses",
               "detail": ", ".join(pp["name"] for pp in parties)[:120]})
-        return parties, personas[: self.cfg.max_personas], list(seeded.outline)
+        return parties, personas, list(seeded.outline)
 
     # ── Phase 2: grounded conversation per persona ──
     def _converse(self, topic: str, persona: Persona, outline: list[str], emit: Emit) -> list[dict]:
@@ -171,6 +200,81 @@ class StormResearchEngine:
             emit({"type": "clue_discovered", "clue": {"title": d.title, "persona": persona.name}})
         return clues
 
+    # ── Phase 3.5: consolidate parties (ADD missed externals + GROUP into alliances) ──
+    def _refine_parties(self, topic: str, parties: list[dict], clues: list[dict], emit: Emit) -> list[dict]:
+        """Single non-search LLM pass over the discovered parties + gathered clues that ports the
+        deleted TS refine-parties.md (ADD / GROUP-INTO-ALLIANCE / DELETE). This is the ONLY place
+        we (a) inject EXTERNAL actors the evidence named but seeding missed and (b) mint named
+        type='alliance' coalition parties. Costs exactly one LLM call, zero extra web searches.
+        Non-fatal: any failure leaves the seeded parties untouched (mirrors the TS try/catch)."""
+        if os.getenv("DANA_REFINE_DISCOVERY", "1") == "0" or not parties:
+            return parties
+        evidence = "\n".join(
+            f"- {c.get('title', '')}: {c.get('summary', '')[:200]}" for c in clues[:30]
+        ) or "(no clues gathered)"
+        party_str = "\n".join(
+            f"- {p['name']} ({p.get('type', '?')}): {p.get('agenda') or p.get('description') or '—'}"
+            for p in parties
+        )
+        try:
+            dec = self.refine(topic=topic, parties=party_str, evidence=evidence)
+        except Exception:  # noqa: BLE001
+            return parties
+        def _find(nm: str):
+            """Resolve an LLM-supplied member name to a live party by exact name OR slug, so a
+            paraphrase ("US" vs "United States (Trump admin)") doesn't silently drop a coalition."""
+            nl, ns = nm.lower().strip(), writers.slugify(nm)
+            for p in parties:
+                if p["name"].lower() == nl or writers.slugify(p["name"]) == ns:
+                    return p
+            return None
+
+        # ADD — inject evidenced actors (esp. external states) missing from the seed.
+        for a in (dec.add or []):
+            if _find(a.name) is not None:
+                continue
+            parties.append({
+                "id": self._uid(a.name), "name": a.name, "type": a.type,
+                "description": a.reason, "agenda": a.reason, "weight": 0, "stance": "active",
+                "auto_discovered": True, "circle": {"visible": [], "shadow": []},
+            })
+            emit({"type": "think", "icon": "➕", "label": f"Adding · {a.name}", "detail": a.reason[:100]})
+
+        # DELETE — drop actors the evidence shows have no agency.
+        for d in (dec.remove or []):
+            tgt = _find(d.name)
+            if tgt is not None:
+                parties[:] = [p for p in parties if p is not tgt]
+                emit({"type": "think", "icon": "➖", "label": f"Removing · {d.name}", "detail": d.reason[:100]})
+
+        # GROUP — materialize aligned blocs into a single type='alliance' party
+        # (ports DiscoveryAgent.ts STEP 3). keep_separate members are left untouched.
+        for g in (dec.group or []):
+            keep = {writers.slugify(n) for n in (g.keep_separate or [])}
+            members, seen_m = [], set()
+            for n in g.member_names:
+                m = _find(n)
+                if m is None or writers.slugify(m["name"]) in keep or id(m) in seen_m:
+                    continue
+                seen_m.add(id(m))
+                members.append(m)
+            if len(members) < 2:
+                continue
+            alliance = {
+                "id": self._uid(g.alliance_name), "name": g.alliance_name, "type": "alliance",
+                "description": f"Alliance of {', '.join(m['name'] for m in members)}. {g.reason}",
+                "agenda": "; ".join(dict.fromkeys(m.get("agenda", "") for m in members if m.get("agenda"))),
+                "weight": 0, "stance": members[0].get("stance", "active"), "auto_discovered": True,
+                "circle": {"visible": [m["name"] for m in members], "shadow": []},
+            }
+            member_ids = {id(m) for m in members}
+            parties[:] = [p for p in parties if id(p) not in member_ids]
+            parties.append(alliance)
+            emit({"type": "think", "icon": "🤝",
+                  "label": f"Alliance · {' + '.join(m['name'] for m in members)} → {g.alliance_name}",
+                  "detail": g.reason[:100]})
+        return parties[: self.cfg.max_parties]
+
     # ── Enrichment: deeper per-party research over EXISTING parties ──
     def enrich(self, topic: str, description: str, parties: list[dict], emit: Emit) -> dict:
         """Reuse the grounded conversation/distill loop, but seed personas from the parties
@@ -204,6 +308,8 @@ class StormResearchEngine:
                   "msg": f"Researching: {persona.name} ({idx + 1}/{len(personas)})"})
             history = self._converse(topic, persona, outline, emit)
             all_clues.extend(self._distill_clues(topic, persona, history, emit))
+        # Consolidate: ADD evidenced externals + GROUP aligned blocs into named alliances.
+        parties = self._refine_parties(topic, parties, all_clues, emit)
         return {
             "parties": parties, "clues": all_clues, "outline": outline,
             "searches_used": self.budget.searches_used, "cache_hits": self.budget.cache_hits,

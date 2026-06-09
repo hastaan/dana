@@ -5,12 +5,14 @@ distinct investigative angles, then synthesizes a cited markdown briefing. Bread
 so the SAME engine serves a bounded per-clue pass, topic-level party discovery, and a long-form
 article — all on Dana's LM (CLIProxyAPI/MiniMax + `<think>` strip) and the Phase-A robustness.
 """
+from datetime import datetime, timezone
 from typing import Callable
 
 import dspy
 
 from ..db import reads, writers
 from ..llm import dspy_lm
+from . import signatures as sig
 from .engine import GroundedResearcher
 from .retriever import DanaRetriever, ResearchBudget
 
@@ -65,15 +67,20 @@ def deep_search(
     max_personas: int | None = None,
     max_turns: int | None = None,
     top_k: int | None = None,
+    geopolitical: bool = False,
     emit: Emit | None = None,
 ) -> dict:
     """`emit` (optional) streams SSE-style dict events (think per angle / progress) for
     traceability; None is fully silent. Synthesized briefings are cached (24h TTL,
-    keyed by breadth+query) so re-runs are cheap."""
+    keyed by breadth+query) so re-runs are cheap.
+
+    `geopolitical=True` (used by discovery grounding) swaps the generic angle generator for
+    the date-aware GroundingAngles signature, which MANDATES coverage of external state actors
+    and the adversarial/conflict dimension so external players are guaranteed to be queried for."""
     emit = emit or _noop_emit
     # Fold breadth + any explicit budget overrides into the key so a deeper/narrower call
-    # doesn't collide with a default-breadth one.
-    cache_key = f"{breadth}:{max_personas}:{max_turns}:{top_k}:{query}"
+    # doesn't collide with a default-breadth one. `geopolitical` changes the angles, so key it.
+    cache_key = f"{breadth}:{max_personas}:{max_turns}:{top_k}:{int(geopolitical)}:{query}"
     cached = reads.get_cached_synthesis(topic_id, "deep_search", cache_key)
     if cached is not None:
         emit({"type": "think", "icon": "💾", "label": "Cached briefing", "detail": query[:80]})
@@ -88,12 +95,16 @@ def deep_search(
         budget = ResearchBudget(max_searches=n_personas * n_turns * 2 + 4)
         retriever = DanaRetriever(topic_id, budget, top_k=k, fetch_top=2)
         researcher = GroundedResearcher(retriever)
-        gen_angles = dspy.Predict(ResearchAngles)
         next_q = dspy.Predict(NextQuestion)
         synth = dspy.ChainOfThought(SynthesizeBriefing)
 
         emit({"type": "progress", "stage": "deep_search", "pct": 0.05, "msg": f"Researching: {query[:80]}"})
-        angles = (gen_angles(subject=query, n=n_personas).angles or [])[:n_personas] or [query]
+        if geopolitical:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            angles = (dspy.Predict(sig.GroundingAngles)(subject=query, today=today, n=n_personas).angles or [])
+        else:
+            angles = (dspy.Predict(ResearchAngles)(subject=query, n=n_personas).angles or [])
+        angles = angles[:n_personas] or [query]
         emit({"type": "think", "icon": "🧭", "label": f"{len(angles)} research angles",
               "detail": ", ".join(angles)[:120]})
         findings: list[tuple[str, str, list]] = []
