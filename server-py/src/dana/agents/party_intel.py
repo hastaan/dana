@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from ..research.gold import get_discovery_guidance
 from ..research.signatures import PartyType
-from .forum_prep import FACTORS, AssessWeights, final_weight
+from .forum_prep import FACTORS, AssessWeights, final_weight, pentagon_weight
 
 
 class Circle(BaseModel):
@@ -118,12 +118,12 @@ def rescore_party(topic: str, description: str, party: dict) -> dict:
             out['vulnerabilities'] = list(dict.fromkeys(w.vulnerabilities))
     else:
         out['weight_factors'] = {f: 20 for f in FACTORS}
-        out['weight'] = round(sum(out['weight_factors'].values()) / len(FACTORS), 1)
+        out['weight'] = pentagon_weight(out['weight_factors'])
         out['weight_evidence'] = {f: 'Baseline estimate — not individually scored.' for f in FACTORS}
     return out
 
 
 def recompute_weight(weight_factors: dict) -> float:
-    """Pure-python mean of the 5 factors (NO LLM) — the PUT/update weight recompute, server-py's
-    analogue of TS computePentagonScore (we use the mean, the rest of server-py's convention)."""
-    return round(sum(int(weight_factors.get(f, 0) or 0) for f in FACTORS) / len(FACTORS), 1)
+    """Pentagon-area weight of the 5 factors (NO LLM) — the PUT/update weight recompute, server-py's
+    port of TS computePentagonScore. Single shared kernel (forum_prep.pentagon_weight)."""
+    return pentagon_weight(weight_factors)

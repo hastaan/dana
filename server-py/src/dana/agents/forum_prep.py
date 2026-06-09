@@ -3,12 +3,16 @@
 Two DSPy calls (batched over all parties to keep it fast):
 1. AssessWeights — the 5-factor influence model (military_capacity, economic_control,
    information_control, international_support, internal_legitimacy), each 0–100, grounded in
-   the evidence, with a one-line justification per party. Final weight = mean of the factors.
+   the evidence, with a one-line justification per party. Final weight = normalized geometric
+   pentagon AREA of the 5 factors (TS computePentagonScore) — a single spiked axis cannot inflate
+   it; balanced strength scores higher.
 2. GenerateRepresentatives — a debate persona (title + system prompt) per party.
 
 Speaking budgets are derived in pure Python from each party's weight share (low-weight
 parties still get a minimum floor so every voice is heard).
 """
+import math
+
 import dspy
 from pydantic import BaseModel, Field
 
@@ -75,8 +79,23 @@ class GenerateRepresentatives(dspy.Signature):
     representatives: list[RepDraft] = dspy.OutputField()
 
 
+_SIN72 = math.sin(2 * math.pi / 5)  # pentagon constant; cancels in normalization, kept for clarity
+
+
+def pentagon_weight(factors: dict) -> float:
+    """Overall party weight = normalized geometric AREA of the radar pentagon of the 5 axes
+    (⇄ TS PartyScorer.computePentagonScore). Each axis contributes only via PRODUCTS with its two
+    neighbours (axis ORDER = FACTORS), so a single spiked axis flanked by low axes adds ~nothing.
+    area constant 0.5*_SIN72 cancels in area/maxArea; kept 1-dp to match server-py convention."""
+    s = [max(0.0, min(100.0, float(factors.get(f, 0) or 0))) for f in FACTORS]
+    adj = sum(s[i] * s[(i + 1) % 5] for i in range(5))
+    max_adj = 5 * 100 * 100
+    return round(100 * adj / max_adj, 1)
+
+
 def final_weight(pw: PartyWeight) -> float:
-    return round(sum(getattr(pw, f) for f in FACTORS) / len(FACTORS), 1)
+    """Pentagon-area weight for a PartyWeight model (thin adapter over pentagon_weight)."""
+    return pentagon_weight({f: getattr(pw, f) for f in FACTORS})
 
 
 def speaking_budget(weight: float, total_weight: float) -> dict:

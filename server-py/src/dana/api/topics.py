@@ -182,7 +182,8 @@ def _dedup_union(sources: list[dict], key: str, sub: str | None = None) -> list[
 @router.put("/api/topics/{topic_id}/parties/{party_id}")
 async def update_party(topic_id: str, party_id: str, body: PartyBody):
     """Update one party in place (PartiesPanel inline edit / save). NO LLM: merges the partial
-    body over the existing party and recomputes weight as the mean of weight_factors."""
+    body over the existing party and recomputes weight as the pentagon area of weight_factors
+    (TS computePentagonScore)."""
     await _require_topic(topic_id)
     existing = await asyncio.to_thread(writers.get_party, topic_id, party_id)
     if existing is None:

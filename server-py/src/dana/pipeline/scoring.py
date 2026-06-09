@@ -11,7 +11,7 @@ from ..agents.scenario_scorer import ScenarioScorer
 from ..db import reads, writers
 from ..events.bus import bus
 from ..llm import dspy_lm, steering
-from ..rigor.dedup import independent_density
+from ..rigor.dedup import effective_weight, independent_density
 
 
 def _parties_str(parties: list[dict]) -> str:
@@ -25,17 +25,30 @@ def _parties_str(parties: list[dict]) -> str:
 
 def _evidence_str(clues: list[dict], density: dict) -> str:
     lines = []
+    _SKIP = ("", "none", "no significant counter-evidence found")
     for i, c in enumerate(clues[:25], 1):
         n = len(c.get("sources") or [])
+        ew = effective_weight(c.get("credibility") or 50, c.get("relevance") or 50,
+                              len(c.get("bias_flags") or []))
+        verdict = c.get("verdict") or "unchecked"
+        flags = ", ".join(c.get("bias_flags") or []) or "none"
         lines.append(
-            f"[{i}] {c.get('title', '')} (credibility {c.get('credibility')}, "
-            f"relevance {c.get('relevance')}, {n} source(s)): {c.get('summary', '')[:300]}"
+            f"[{i}] {c.get('title', '')} (effective_weight {ew}, credibility "
+            f"{c.get('credibility')}, relevance {c.get('relevance')}, {n} source(s), "
+            f"verdict={verdict}, bias_flags={flags}): {c.get('summary', '')[:300]}"
         )
+        counter = (c.get("counter_evidence") or "").strip()
+        if counter and counter.lower() not in _SKIP:
+            lines.append(f"  COUNTER-EVIDENCE: {counter[:160]}")
+        cui = (c.get("cui_bono") or "").strip()
+        if cui and cui.lower() not in _SKIP:
+            lines.append(f"  CUI BONO: {cui[:120]}")
     note = (
-        f"\nSource-independence: {density['independent_density']} independent evidence density "
-        f"across {density['source_clusters']} distinct source-cluster(s) "
-        f"(raw {density['raw_density']}). Corroboration spanning more clusters is stronger; "
-        f"a single cluster is weak."
+        f"\nSource-independence: use the INDEPENDENT density ({density['independent_density']}) "
+        f"across {density['source_clusters']} distinct source-cluster(s), NOT the raw density "
+        f"({density['raw_density']}). Corroboration spanning more independent clusters is stronger; "
+        f"a single cluster (one wire echoed by many outlets) is weak. effective_weight is the "
+        f"primary per-clue weight (credibility x relevance, bias-penalized)."
     )
     return ("\n".join(lines) or "(no evidence gathered)") + note
 
@@ -60,7 +73,7 @@ async def run_scoring(topic_id: str, title: str, description: str) -> dict:
     clues = await reads.list_clues(topic_id)
     density = independent_density(
         [{"credibility": c.get("credibility") or 50, "relevance": c.get("relevance") or 50,
-          "sources": c.get("sources") or []} for c in clues]
+          "bias_flags": c.get("bias_flags") or [], "sources": c.get("sources") or []} for c in clues]
     )
     topic_str = (f"{title}\n{description}".strip()
                  + await steering.steering_for(topic_id, "evidence"))

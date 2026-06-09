@@ -109,7 +109,7 @@ async def list_clues(topic_id: str) -> list[dict]:
         "cv.bias_corrected_summary AS summary, cv.clue_type AS clue_type, "
         "cv.relevance_score AS relevance, cv.party_relevance AS party_relevance, "
         "cv.domain_tags AS domain_tags, cv.source_credibility AS source_credibility, "
-        "cv.key_points AS key_points "
+        "cv.key_points AS key_points, cv.fact_check AS fact_check "
         "FROM clues c JOIN clue_versions cv "
         "ON cv.clue_id = c.id AND cv.topic_id = c.topic_id AND cv.version = c.current_version "
         "WHERE c.topic_id = :t ORDER BY cv.relevance_score DESC"
@@ -119,13 +119,24 @@ async def list_clues(topic_id: str) -> list[dict]:
     out = []
     for r in rows:
         cred = json.loads(r["source_credibility"] or "{}")
+        fc = json.loads(r["fact_check"] or "{}")
+        # ⇄ TS clueMap build: adjusted_credibility ?? raw; adjusted_bias_flags ?? source_credibility.bias_flags.
+        raw_credibility = cred.get("score")
+        adj = fc.get("adjusted_credibility")
+        credibility = adj if adj is not None else raw_credibility
         out.append({
             "id": r["id"], "status": r["status"], "title": r["title"], "summary": r["summary"],
             "clue_type": r["clue_type"], "relevance": r["relevance"],
             "party_relevance": json.loads(r["party_relevance"] or "[]"),
             "domain_tags": json.loads(r["domain_tags"] or "[]"),
             "key_points": json.loads(r["key_points"] or "[]"),
-            "credibility": cred.get("score"),
+            "credibility": credibility,
+            "raw_credibility": raw_credibility,
+            "bias_flags": fc.get("adjusted_bias_flags") or cred.get("bias_flags", []),
+            "verdict": fc.get("verdict"),
+            "counter_evidence": fc.get("counter_evidence", ""),
+            "cui_bono": fc.get("cui_bono", ""),
+            "bias_analysis": fc.get("bias_analysis", ""),
             "sources": [s.get("url") for s in cred.get("origin_sources", [])],
         })
     return out

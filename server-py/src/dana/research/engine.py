@@ -10,7 +10,7 @@ from typing import Callable
 
 import dspy
 
-from ..agents.forum_prep import FACTORS, AssessWeights, final_weight
+from ..agents.forum_prep import FACTORS, AssessWeights, final_weight, pentagon_weight
 from ..db import writers
 from . import signatures as sig
 from .retriever import DanaRetriever, Information, ResearchBudget
@@ -286,7 +286,7 @@ class StormResearchEngine:
         """ONE non-search LLM pass that scores the 5 influence axes AND fills means/
         vulnerabilities for every party from the ALREADY-gathered clues - so a discovery-only
         review shows full pentagon scores + profiles instead of zeros/dashes. Reuses the
-        forum-prep AssessWeights signature + final_weight (the sanctioned mean). Costs exactly
+        forum-prep AssessWeights signature + final_weight (the shared pentagon-area weight). Costs exactly
         one LLM call, zero extra web searches. Non-fatal: any failure leaves seeded parties as-is.
         Gate with DANA_SCORE_DISCOVERY (default '1'), mirroring DANA_REFINE_DISCOVERY."""
         if os.getenv('DANA_SCORE_DISCOVERY', '1') == '0' or not parties:
@@ -360,7 +360,7 @@ class StormResearchEngine:
             if p['id'] in scored or p.get('weight_factors'):
                 continue
             p['weight_factors'] = {f: 20 for f in FACTORS}
-            p['weight'] = round(sum(p['weight_factors'].values()) / len(FACTORS), 1)
+            p['weight'] = pentagon_weight(p['weight_factors'])
             p['weight_evidence'] = {f: 'Baseline estimate — not individually scored.' for f in FACTORS}
         return parties
 

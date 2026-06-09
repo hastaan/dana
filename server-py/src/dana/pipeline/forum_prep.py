@@ -5,7 +5,7 @@ The DSPy program runs in a worker thread (never blocks the loop/SSE).
 """
 import asyncio
 
-from ..agents.forum_prep import FACTORS, ForumPrep, final_weight, speaking_budget
+from ..agents.forum_prep import FACTORS, ForumPrep, final_weight, pentagon_weight, speaking_budget
 from ..db import reads, writers
 from ..events.bus import bus
 from ..llm import dspy_lm
@@ -24,7 +24,7 @@ async def run_forum_prep(topic_id: str, title: str, description: str) -> dict:
     clues = await reads.list_clues(topic_id)
     density = independent_density(
         [{"credibility": c.get("credibility") or 50, "relevance": c.get("relevance") or 50,
-          "sources": c.get("sources") or []} for c in clues]
+          "bias_flags": c.get("bias_flags") or [], "sources": c.get("sources") or []} for c in clues]
     )
     topic_str = f"{title}\n{description}".strip()
     parties_str = "\n".join(
@@ -44,7 +44,7 @@ async def run_forum_prep(topic_id: str, title: str, description: str) -> dict:
     emit({"type": "progress", "stage": "forum_prep", "pct": 0.4, "msg": "Assessing party weights…"})
     out = await asyncio.to_thread(_work)
 
-    # Persist weights (mean of the 5 factors), keyed by party_id.
+    # Persist weights (pentagon area of the 5 factors), keyed by party_id.
     by_id = {p["id"]: p for p in parties}
     weight_of: dict[str, float] = {}
     for w in out["weights"]:
@@ -52,7 +52,7 @@ async def run_forum_prep(topic_id: str, title: str, description: str) -> dict:
         if pid not in by_id:
             continue
         factors = {f: w.get(f, 0) for f in FACTORS}
-        wt = round(sum(factors.values()) / len(FACTORS), 1)
+        wt = pentagon_weight(factors)
         weight_of[pid] = wt
         evidence = {f: w.get("justification", "") for f in FACTORS}
         writers.update_party_weight(topic_id, pid, wt, factors, evidence)

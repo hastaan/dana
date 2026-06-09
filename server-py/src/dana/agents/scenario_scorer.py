@@ -53,13 +53,30 @@ class ScoreScenarios(dspy.Signature):
     justify deviations; an objective, third-party-checkable resolution_criteria and a
     resolution_date; key_drivers; watch_indicators (observable signals to monitor); and a
     1-2 sentence evidence_chain citing the findings.
-    Prefer scenarios backed by INDEPENDENT corroboration (see the independence note); a
-    single source-cluster is weak. Give a final_assessment and a confidence_note. Do not
-    invent evidence."""
+
+    WEIGHING THE EVIDENCE (⇄ score-scenarios.md):
+    1. effective_weight is the single most important number per clue — weigh evidence by it, NOT
+       by clue count. A clue with effective_weight=8.5 is nearly twice as strong as one at 4.3.
+    2. Discount by the fact-check verdict: VERIFIED = full weight (treat as confirmed); DISPUTED =
+       ~half weight (contested, treat as a possibility); MISLEADING = near-zero evidential weight
+       (cite only as "reveals X believes Y", not as fact); UNVERIFIABLE = weight by credibility alone.
+    3. When a clue's COUNTER-EVIDENCE falsifies a condition a scenario REQUIRES, lower that
+       scenario's probability proportional to that clue's effective_weight. Discount self-serving
+       CUI BONO framing — if the party that benefits from a claim is the one pushing it, treat it as
+       self-serving even if credible.
+    4. Use the INDEPENDENT density and independent source-cluster count, NOT the raw density: one
+       large cluster (a single wire echoed by many aligned outlets) is ONE confirmation, weaker than
+       several independent clusters of similar total weight.
+    5. confidence='high' ONLY when >=2 INDEPENDENT (different source clusters) VERIFIED clues of
+       effective_weight>=5 support the scenario AND counter-evidence is weak; else medium/low (low if
+       evidence is thin, single-cluster, or dominated by MISLEADING/UNVERIFIABLE/high-bias clues).
+
+    Give a final_assessment and a confidence_note. Do not invent evidence."""
 
     topic: str = dspy.InputField()
     scenarios: str = dspy.InputField()
-    evidence: str = dspy.InputField(desc="findings + source-independence note")
+    evidence: str = dspy.InputField(desc="findings with per-clue effective_weight + verdict + "
+                                         "counter-evidence/cui-bono + source-independence note")
     scenarios_ranked: list[RankedScenario] = dspy.OutputField()
     final_assessment: str = dspy.OutputField()
     confidence_note: str = dspy.OutputField()

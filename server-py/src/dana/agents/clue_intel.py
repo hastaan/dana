@@ -452,7 +452,12 @@ def fact_check_clue(
     emit = emit or _noop_emit
     title = clue_fields.get("title", "")
     summary = f"{title}: {clue_fields.get('bias_corrected_summary', '')}"
-    research = _gather_for_query(topic_id, [f"{title} fact check counter evidence"], emit=emit)
+    research = _gather_for_query(
+        topic_id,
+        [f"{title} fact check counter evidence",
+         f"{title} disputed OR debunked OR contradicted {_year()}"],
+        emit=emit,
+    )
     try:
         return dspy.ChainOfThought(FactCheckClue)(
             topic=f"{topic}: {description}", description=summary,
