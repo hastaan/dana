@@ -191,6 +191,81 @@ async def list_representatives(topic_id: str) -> list[dict]:
     } for r in rows]
 
 
+async def _get_state(topic_id: str, version: int) -> dict | None:
+    """Async single state read (⇄ dbGetState) — used by the versioned read guards."""
+    async with get_engine().connect() as conn:
+        r = (await conn.execute(
+            text("SELECT * FROM states WHERE topic_id=:t AND version=:v"), {"t": topic_id, "v": version}
+        )).mappings().first()
+    if not r:
+        return None
+    try:
+        clue_snap = json.loads(r["clue_snapshot"]) if r["clue_snapshot"] else {"count": 0, "ids_and_versions": {}}
+    except (ValueError, TypeError, json.JSONDecodeError):
+        clue_snap = {"count": 0, "ids_and_versions": {}}
+    try:
+        completed = json.loads(r["completed_stages"]) if r["completed_stages"] else []
+    except (ValueError, TypeError, json.JSONDecodeError):
+        completed = []
+    return {
+        "version": r["version"], "version_status": r["version_status"] or "complete",
+        "completed_stages": completed, "clue_snapshot": clue_snap,
+        "forum_session_id": r["forum_session_id"],
+        "parties_snapshot": r["parties_snapshot"],
+        "representatives_snapshot": r["representatives_snapshot"],
+    }
+
+
+async def list_parties_at_version(topic_id: str, version: int) -> list[dict]:
+    """Parties as of a historical version (⇄ TS parties route ?version=). Empty until discovery
+    completed for that version; a completed version serves its pinned parties_snapshot; otherwise
+    falls back to the live parties (an in-progress version reflects current state)."""
+    state = await _get_state(topic_id, version)
+    if not state or "discovery" not in state["completed_stages"]:
+        return []
+    if state["version_status"] == "complete" and state["parties_snapshot"]:
+        try:
+            return json.loads(state["parties_snapshot"])
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+    return await list_parties(topic_id)
+
+
+async def list_representatives_at_version(topic_id: str, version: int) -> list[dict]:
+    """Representatives as of a historical version (⇄ TS forum route ?version=). Empty until
+    forum_prep completed; a completed version serves its pinned representatives_snapshot."""
+    state = await _get_state(topic_id, version)
+    if not state or "forum_prep" not in state["completed_stages"]:
+        return []
+    if state["version_status"] == "complete" and state["representatives_snapshot"]:
+        try:
+            return json.loads(state["representatives_snapshot"])
+        except (ValueError, TypeError, json.JSONDecodeError):
+            pass
+    return await list_representatives(topic_id)
+
+
+async def list_clues_api_at_version(topic_id: str, version: int) -> list[dict]:
+    """Clues (nested API shape) as of a historical version (⇄ TS clues route ?version= →
+    dbGetCluesAtSnapshot). Empty until enrichment completed; a completed version pins each clue to
+    its snapshot version (drops later versions / clues added after); otherwise the live list."""
+    state = await _get_state(topic_id, version)
+    if not state or "enrichment" not in state["completed_stages"]:
+        return []
+    snap = (state["clue_snapshot"] or {}).get("ids_and_versions") or {}
+    if state["version_status"] == "complete" and snap:
+        all_clues = await list_clues_api(topic_id)
+        out = []
+        for c in all_clues:
+            if c["id"] not in snap:
+                continue
+            pinned = snap[c["id"]]
+            out.append({**c, "current": pinned,
+                        "versions": [v for v in c["versions"] if v["v"] <= pinned]})
+        return out
+    return await list_clues_api(topic_id)
+
+
 async def list_states(topic_id: str) -> list[dict]:
     """⇄ TS dbGetAllStates → rowToState. Version-history for the version selector.
     No 404 guard — unknown topic returns []. Returns the FULL KnowledgeState shape."""
@@ -260,6 +335,26 @@ async def get_app_settings() -> dict | None:
             text("SELECT value FROM app_settings WHERE key='app_settings'")
         )).mappings().first()
     return json.loads(r["value"]) if r else None
+
+
+def get_analysis_controls() -> dict:
+    """Sync read of app_settings.analysis_controls (worker-thread safe; mirrors
+    get_prompt_config's connect() pattern). {} when unset or the table is absent → the
+    caller falls back to shipped defaults (llm/controls.DEFAULTS)."""
+    try:
+        with connect() as c:
+            row = c.execute(
+                "SELECT value FROM app_settings WHERE key='app_settings'"
+            ).fetchone()
+    except sqlite3.Error:
+        return {}
+    if not row:
+        return {}
+    try:
+        controls = (json.loads(row["value"]) or {}).get("analysis_controls")
+        return controls if isinstance(controls, dict) else {}
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return {}
 
 
 def _turn_row(r) -> dict:

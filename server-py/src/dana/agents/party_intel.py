@@ -4,12 +4,18 @@ Small, NON-search DSPy signatures port the deleted add/edit/merge/split prompts;
 produced here (the prompts forbid it) — every route re-derives it via rescore_party (AssessWeights
 + final_weight). Sync; run inside asyncio.to_thread under dspy_lm.lm_context().
 """
+from typing import Callable
+
 import dspy
 from pydantic import BaseModel, Field
 
+from ..llm.controls import control
+from ..research.gather import gather_research
 from ..research.gold import get_discovery_guidance
 from ..research.signatures import PartyType
 from .forum_prep import FACTORS, AssessWeights, final_weight, pentagon_weight
+
+Emit = Callable[[dict], None]
 
 
 class Circle(BaseModel):
@@ -29,26 +35,43 @@ class PartyProfile(BaseModel):
     vulnerabilities: list[str] = Field(default_factory=list)
 
 
+class PartyQueries(dspy.Signature):  # port party-intelligence query-gen (add/edit research)
+    """Generate targeted web-search queries to research a political/geopolitical party for a
+    forecasting topic. Produce specific, fact-finding queries that surface the party's leadership,
+    backers, capabilities, agenda, recent activity, and vulnerabilities — grounded in current,
+    verifiable reporting."""
+    topic: str = dspy.InputField()
+    party_name: str = dspy.InputField()
+    focus: str = dspy.InputField(desc="what to research (profile build, or user feedback to address)")
+    queries: list[str] = dspy.OutputField(desc="3-5 search query strings")
+
+
 class SmartAddParty(dspy.Signature):  # port add.md
-    """Profile a single political/geopolitical party for a forecasting topic. Fill every field
-    with specific, grounded detail: a 2-4 sentence description, its agenda, its means (levers of
-    power), its circle (visible = known public allies/key figures/institutions; shadow = inferred
-    or covert backers/proxies, each with brief context), stance, and vulnerabilities. Do NOT output
-    weight or weight_factors — those are computed separately by a dedicated scoring pipeline."""
+    """Profile a single political/geopolitical party for a forecasting topic, grounded in the
+    gathered research. Fill every field with specific, grounded detail: a 2-4 sentence description,
+    its agenda, its means (levers of power), its circle (visible = known public allies/key figures/
+    institutions; shadow = inferred or covert backers/proxies, each with brief context), stance, and
+    vulnerabilities. Prefer specifics named in the research (people, institutions, dates) over
+    generic claims; do NOT invent capabilities the research does not support. Do NOT output weight
+    or weight_factors — those are computed separately by a dedicated scoring pipeline."""
     topic: str = dspy.InputField()
     description: str = dspy.InputField(desc="the topic description / context")
     party_name: str = dspy.InputField()
     existing_names: str = dspy.InputField(desc="names of parties already in the set (avoid duplicating)")
+    research: str = dspy.InputField(desc="gathered web research about this party (may be empty)")
     profile: PartyProfile = dspy.OutputField()
 
 
 class SmartEditParty(dspy.Signature):  # port edit.md
-    """Given a party's current profile (JSON) and user feedback, return an updated profile that
-    addresses the feedback. Preserve accurate existing information; only change fields the feedback
-    warrants. Keep circle.visible/circle.shadow populated. Do NOT output weight or weight_factors."""
+    """Given a party's current profile (JSON), user feedback, and freshly-gathered research, return
+    an updated profile that addresses the feedback. Preserve accurate existing information; only
+    change fields the feedback and research warrant. Ground new claims in the research (cite specific
+    people/institutions/dates from it); do NOT invent unsupported detail. Keep circle.visible/
+    circle.shadow populated. Do NOT output weight or weight_factors."""
     topic: str = dspy.InputField()
     current_party: str = dspy.InputField(desc="the party's current profile as JSON")
     feedback: str = dspy.InputField()
+    research: str = dspy.InputField(desc="gathered web research (may be empty)")
     profile: PartyProfile = dspy.OutputField()
 
 
@@ -127,3 +150,35 @@ def recompute_weight(weight_factors: dict) -> float:
     """Pentagon-area weight of the 5 factors (NO LLM) — the PUT/update weight recompute, server-py's
     port of TS computePentagonScore. Single shared kernel (forum_prep.pentagon_weight)."""
     return pentagon_weight(weight_factors)
+
+
+# ── Party research gathering (⇄ TS PartyIntelligence agentic web_search loop) ──────────
+def _party_queries(topic: str, party_name: str, focus: str) -> list[str]:
+    """Generate party-research queries (1 LLM call), with a deterministic fallback so the gather
+    always has something to search even if query-gen fails."""
+    try:
+        qs = dspy.ChainOfThought(PartyQueries)(
+            topic=topic, party_name=party_name, focus=focus).queries or []
+    except Exception:  # noqa: BLE001
+        qs = []
+    qs = [q for q in qs if q and q.strip()]
+    if not qs:
+        base = f"{party_name} {topic}".strip()
+        qs = [base, f"{party_name} leadership agenda allies", f"{party_name} {focus}".strip()]
+    return qs
+
+
+def gather_party_research(topic_id: str, topic: str, party_name: str, focus: str,
+                          *, emit: Emit | None = None) -> str:
+    """Bounded, corpus-aware, event-emitting research about a party (⇄ TS gatherResearch in the
+    party add/edit flows). Query count + char budget honor analysis_controls.smart_edit_queries /
+    smart_edit_max_chars. Sync — call inside lm_context in a worker thread. "" when search is
+    unavailable (the caller's signature treats research as optional)."""
+    qs = _party_queries(topic, party_name, focus)[: control("smart_edit_queries", 4)]
+    return gather_research(
+        topic_id, qs,
+        max_queries=control("smart_edit_queries", 4),
+        fetch_per=2, fetch_chars=2000,
+        max_chars=control("smart_edit_max_chars", 12000),
+        stage="discovery", emit=emit,
+    )

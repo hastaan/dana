@@ -10,6 +10,7 @@ from ..db import reads, writers
 from ..events.bus import bus
 from ..llm import dspy_lm
 from ..rigor.dedup import independent_density
+from . import state_manager
 from .scoring import _evidence_str, _parties_str
 
 
@@ -18,6 +19,8 @@ async def run_forum_prep(topic_id: str, title: str, description: str) -> dict:
         bus.emit(topic_id, ev)
 
     writers.set_topic_status(topic_id, "forum_prep")
+    version = await asyncio.to_thread(
+        state_manager.get_or_allocate_version, topic_id, fork_stage="forum_prep")
     emit({"type": "progress", "stage": "forum_prep", "pct": 0.0, "msg": "Generating forum representatives…"})
 
     parties = await reads.list_parties(topic_id)
@@ -33,8 +36,10 @@ async def run_forum_prep(topic_id: str, title: str, description: str) -> dict:
     ) or "(none)"
     evidence_str = _evidence_str(clues, density)
 
+    model = dspy_lm.model_for(topic_id, "forum_reasoning")
+
     def _work() -> dict:
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
             pred = ForumPrep()(topic=topic_str, parties_str=parties_str, evidence_str=evidence_str)
             return {
                 "weights": [w.model_dump() for w in pred.weights],
@@ -91,6 +96,7 @@ async def run_forum_prep(topic_id: str, title: str, description: str) -> dict:
             })
 
     writers.save_representatives(topic_id, reps)
+    await asyncio.to_thread(state_manager.mark_stage_complete, topic_id, version, "forum_prep")
     writers.set_topic_status(topic_id, "review_forum_prep")
     emit({"type": "weight_result",
           "parties": sorted(([{"name": by_id[r['party_id']]['name'], "weight": r["speaking_weight"]}

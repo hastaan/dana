@@ -16,9 +16,8 @@ from typing import Callable, Literal
 import dspy
 from pydantic import BaseModel, Field
 
-from ..db import writers
-from ..tools.http_fetch import http_fetch
-from ..tools.web_search import web_search
+from ..llm.controls import control
+from ..research.gather import gather_research, is_fetchable  # noqa: F401 (is_fetchable re-exported)
 
 Emit = Callable[[dict], None]
 
@@ -33,21 +32,6 @@ def _year() -> str:
 
 def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
-
-
-# Hosts whose pages we never fetch (anti-bot / login-walled social) — use the search snippet
-# instead. Ported verbatim from SmartClueExtractor.isFetchable().
-_NON_FETCHABLE = ("x.com", "twitter.com", "instagram.com", "facebook.com", "truthsocial.com", "t.me")
-
-
-def is_fetchable(url: str) -> bool:
-    try:
-        import re
-        m = re.match(r"https?://([^/?#]+)", url or "", re.I)
-        host = (m.group(1) if m else "").lower()
-        return bool(host) and not any(s in host for s in _NON_FETCHABLE)
-    except Exception:  # noqa: BLE001
-        return False
 
 
 def _party_list(parties: list[dict]) -> str:
@@ -299,58 +283,17 @@ def _gather_for_query(
     fetch_chars: int = 2000,
     emit: Emit | None = None,
 ) -> str:
-    """Gather source context for a set of search queries (⇄ TS gatherResearch in
-    research/edit/update/fact-check). BOUNDED: the caller caps `queries` to <=4 and we fetch the
-    top `fetch_per` (=2) results per query. Corpus-aware: a <24h cached search is reused, else
-    web_search(sq,3) is stored; per result, non-fetchable hosts use the snippet, otherwise a
-    cached page is reused else http_fetch(url, fetch_chars) is stored. Returns the fragments
-    `[title] (url)\\n<text|snippet>` joined by `\\n\\n---\\n\\n`, sliced to 12000 chars ("" if
-    nothing gathered)."""
-    emit = emit or _noop_emit
-    fragments: list[str] = []
-    for sq in queries[:4]:
-        try:
-            results = writers.corpus_find_search(topic_id, sq, 24.0)
-            if not results:
-                results = web_search(sq, 3)
-                if results:
-                    try:
-                        writers.corpus_store_search(topic_id, sq, results, "enrichment")
-                    except Exception:  # noqa: BLE001
-                        pass
-            for r in (results or [])[:fetch_per]:
-                url = r.get("url", "")
-                title = r.get("title", "") or url
-                snippet = r.get("snippet", "") or ""
-                if not is_fetchable(url):
-                    if snippet:
-                        fragments.append(f"[{title}] ({url})\n{snippet}")
-                    continue
-                cached = None
-                try:
-                    cached = writers.corpus_get_page(topic_id, url)
-                except Exception:  # noqa: BLE001
-                    cached = None
-                if cached and cached.get("content"):
-                    fragments.append(f"[{cached.get('title') or title}] ({url})\n{cached['content'][:fetch_chars]}")
-                    continue
-                fetched = None
-                try:
-                    fetched = http_fetch(url, fetch_chars)
-                except Exception:  # noqa: BLE001
-                    fetched = None
-                if fetched:
-                    ftitle, ftext = fetched
-                    fragments.append(f"[{title}] ({url})\n{ftext[:fetch_chars]}")
-                    try:
-                        writers.corpus_store_page(topic_id, url, ftitle, ftext, "enrichment")
-                    except Exception:  # noqa: BLE001
-                        pass
-                elif snippet:
-                    fragments.append(f"[{title}] ({url})\n{snippet}")
-        except Exception:  # noqa: BLE001
-            continue
-    return "\n\n---\n\n".join(fragments)[:12000]
+    """Bounded, corpus-aware research gather with live activity events. Thin wrapper over the
+    shared research.gather.gather_research (⇄ TS gatherResearch). Query count and the research
+    char budget are operator-tunable (analysis_controls.smart_edit_queries / smart_edit_max_chars);
+    fetch_chars/fetch_per stay as the caller passed them."""
+    return gather_research(
+        topic_id, queries,
+        max_queries=control("smart_edit_queries", 4),
+        fetch_per=fetch_per, fetch_chars=fetch_chars,
+        max_chars=control("smart_edit_max_chars", 12000),
+        stage="enrichment", emit=emit,
+    )
 
 
 def _dedupe_by_title(clues: list[ExtractedClue]) -> list[ExtractedClue]:
@@ -382,10 +325,12 @@ def smart_extract_research(
         qs = []
     if not qs:
         qs = [query, f"{query} {topic} {_year()}"]
-    qs = qs[:4]
+    qs = qs[:control("research_search_queries", 4)]
     ctx = _gather_for_query(topic_id, qs, emit=emit)
     if not ctx:
         return []
+    emit({"type": "think", "icon": "🧠", "label": "Extracting clues",
+          "detail": "Reading sources and drafting evidence…"})
     try:
         clues = dspy.ChainOfThought(ExtractClues)(
             topic=f"{topic}: {description}", party_list=_party_list(parties), content=ctx).clues or []
@@ -420,6 +365,8 @@ def smart_edit_clue(
     import json
     emit = emit or _noop_emit
     research = _gather_for_query(topic_id, [f"{feedback} {current_data.get('title', '')}"], emit=emit)
+    emit({"type": "think", "icon": "✏️", "label": "Re-evaluating clue",
+          "detail": "Applying your feedback to the evidence…"})
     return dspy.ChainOfThought(SmartEditClue)(
         topic=topic, current_clue=json.dumps(current_data), feedback=feedback, research=research).updated
 

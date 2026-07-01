@@ -12,6 +12,7 @@ from ..db import reads, writers
 from ..events.bus import bus
 from ..llm import dspy_lm, steering
 from ..rigor.dedup import effective_weight, independent_density
+from . import state_manager
 
 
 def _parties_str(parties: list[dict]) -> str:
@@ -67,6 +68,23 @@ async def run_scoring(topic_id: str, title: str, description: str) -> dict:
         bus.emit(topic_id, ev)
 
     writers.set_topic_status(topic_id, "expert_council")
+    version = await asyncio.to_thread(
+        state_manager.get_or_allocate_version, topic_id, fork_stage="expert_council")
+    out = await score_into_version(topic_id, title, description, version, emit)
+    # Finalize the version: pins clue/parties/reps snapshots + sets topic complete (⇄ finalizeVersion).
+    await asyncio.to_thread(
+        state_manager.finalize_version, topic_id, version,
+        forum_session_id=out.get("forum_session_id"), verdict_id=out.get("verdict_id"))
+    emit({"type": "stage_complete", "stage": "expert_council"})
+    return {"version": version, "scenarios_ranked": out["scenarios_ranked"]}
+
+
+async def score_into_version(topic_id: str, title: str, description: str, version: int,
+                             emit) -> dict:
+    """Score the current evidence into a verdict for an ALREADY-ALLOCATED version (save_verdict +
+    verdict_content SSE) WITHOUT finalizing the version. run_scoring wraps this with allocate +
+    finalize; the delta pipeline calls it directly (it finalizes with delta provenance itself).
+    Returns {scenarios_ranked, final_assessment, confidence_note, verdict_id, forum_session_id}."""
     emit({"type": "progress", "stage": "expert_council", "pct": 0.0, "msg": "Scoring scenarios…"})
 
     parties = await reads.list_parties(topic_id)
@@ -98,8 +116,10 @@ async def run_scoring(topic_id: str, title: str, description: str) -> dict:
           "detail": f"{len(clues)} clues · {density['source_clusters']} clusters · {len(parties)} parties"
                     f"{' · forum debate' if forum_note else ''}"})
 
+    model = dspy_lm.model_for(topic_id, "expert_council")
+
     def _work() -> dict:
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
             scorer = ScenarioScorer()
             pred = scorer(topic=topic_str, parties_str=parties_str, evidence_str=evidence_str)
             return {
@@ -119,14 +139,11 @@ async def run_scoring(topic_id: str, title: str, description: str) -> dict:
                           "base rates and objective resolution criteria.",
         "auto_generated": True,
     }]
-    version = 1
-    writers.save_verdict(
+    verdict_id = writers.save_verdict(
         topic_id, version, experts, ranked,
         out["final_assessment"], out["confidence_note"],
-        evidence_map=[], debate_summary=None,
+        evidence_map=[], debate_summary=(forum or {}).get("debate_summary"),
     )
-
-    writers.set_topic_status(topic_id, "complete")
     top = ranked[0] if ranked else None
     emit({
         "type": "verdict_content",
@@ -137,5 +154,6 @@ async def run_scoring(topic_id: str, title: str, description: str) -> dict:
     })
     emit({"type": "progress", "stage": "expert_council", "pct": 1.0,
           "msg": f"Verdict ready — {len(ranked)} scenarios ranked"})
-    emit({"type": "stage_complete", "stage": "expert_council"})
-    return {"version": version, "scenarios_ranked": ranked}
+    return {"scenarios_ranked": ranked, "final_assessment": out["final_assessment"],
+            "confidence_note": out["confidence_note"], "verdict_id": verdict_id,
+            "forum_session_id": (forum or {}).get("session_id")}

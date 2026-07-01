@@ -10,6 +10,7 @@ from ..db import writers
 from ..events.bus import bus
 from ..llm import dspy_lm, steering
 from ..research.engine import ResearchConfig, StormResearchEngine
+from . import state_manager
 
 
 async def run_discovery(topic_id: str, title: str, description: str, cfg: ResearchConfig | None = None) -> dict:
@@ -18,10 +19,15 @@ async def run_discovery(topic_id: str, title: str, description: str, cfg: Resear
 
     description = (description or "") + await steering.steering_for(topic_id, "research")
     writers.set_topic_status(topic_id, "discovery")
+    # Reuse the in-progress version or fork a fresh one from the latest complete version.
+    version = await asyncio.to_thread(
+        state_manager.get_or_allocate_version, topic_id, fork_stage="discovery")
     emit({"type": "progress", "stage": "discovery", "pct": 0.0, "msg": "Starting discovery…"})
 
+    model = dspy_lm.model_for(topic_id, "data_gathering")
+
     def _work() -> dict:
-        with dspy_lm.lm_context():  # thread-local LM for this worker thread
+        with dspy_lm.lm_context(model):  # thread-local LM for this worker thread
             engine = StormResearchEngine(topic_id, cfg)
             return engine.run(title, description, emit)
 
@@ -60,6 +66,7 @@ async def run_discovery(topic_id: str, title: str, description: str, cfg: Resear
         except Exception as e:  # noqa: BLE001
             emit({"type": "think", "icon": "⚠", "label": "clue store failed", "detail": str(e)[:80]})
 
+    await asyncio.to_thread(state_manager.mark_stage_complete, topic_id, version, "discovery")
     writers.set_topic_status(topic_id, "review_parties")
     emit({"type": "weight_result",
           "parties": [{"name": p["name"], "weight": p.get("weight", 0)} for p in result["parties"]]})

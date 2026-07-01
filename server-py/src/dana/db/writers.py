@@ -54,6 +54,19 @@ def set_topic_status(topic_id: str, status: str) -> None:
         c.execute("UPDATE topics SET status=?, updated_at=? WHERE id=?", (status, ISO(), topic_id))
 
 
+def get_topic_models(topic_id: str) -> dict:
+    """Sync read of a topic's per-stage model map (⇄ topic.models). {} when the topic is absent
+    or the column is empty. Callable from a worker thread (used by dspy_lm.model_for)."""
+    with connect() as c:
+        row = c.execute("SELECT models FROM topics WHERE id=?", (topic_id,)).fetchone()
+    if row is None:
+        return {}
+    try:
+        return json.loads(row["models"] or "{}")
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return {}
+
+
 def update_topic(topic_id: str, patch: dict) -> dict | None:
     """⇄ TS dbUpdateTopic. Partial {title,description,status,models,settings}. ONE-LEVEL
     settings merge (so a partial settings patch never wipes sibling keys like 'steering');
@@ -127,6 +140,185 @@ def delete_clue(topic_id: str, clue_id: str) -> bool:
         c.execute("DELETE FROM clue_versions WHERE clue_id=? AND topic_id=?", (clue_id, topic_id))
         c.execute("DELETE FROM clues WHERE id=? AND topic_id=?", (clue_id, topic_id))
         return existed
+
+
+# ── States / version history (⇄ TS db/queries/states.ts) ────────────────────────
+def get_all_states(topic_id: str) -> list[dict]:
+    """Sync version-history read (⇄ dbGetAllStates). Worker-thread safe; mirrors the field
+    mapping of reads.list_states. Ordered by version ASC."""
+    with connect() as c:
+        rows = c.execute(
+            "SELECT * FROM states WHERE topic_id=? ORDER BY version ASC", (topic_id,)
+        ).fetchall()
+    return [_state_row(r) for r in rows]
+
+
+def get_state(topic_id: str, version: int) -> dict | None:
+    with connect() as c:
+        r = c.execute(
+            "SELECT * FROM states WHERE topic_id=? AND version=?", (topic_id, version)
+        ).fetchone()
+    return _state_row(r) if r else None
+
+
+def get_latest_state(topic_id: str) -> dict | None:
+    with connect() as c:
+        r = c.execute(
+            "SELECT * FROM states WHERE topic_id=? ORDER BY version DESC LIMIT 1", (topic_id,)
+        ).fetchone()
+    return _state_row(r) if r else None
+
+
+def get_latest_complete_state(topic_id: str) -> dict | None:
+    with connect() as c:
+        r = c.execute(
+            "SELECT * FROM states WHERE topic_id=? AND version_status='complete' "
+            "ORDER BY version DESC LIMIT 1", (topic_id,)
+        ).fetchone()
+    return _state_row(r) if r else None
+
+
+def _state_row(r) -> dict:
+    def _j(v, default):
+        try:
+            return json.loads(v) if v else default
+        except (ValueError, TypeError, json.JSONDecodeError):
+            return default
+    return {
+        "version": r["version"], "label": r["label"], "created_at": r["created_at"],
+        "trigger": r["trigger"], "clue_snapshot": _j(r["clue_snapshot"], {"count": 0, "ids_and_versions": {}}),
+        "forum_session_id": r["forum_session_id"], "verdict_id": r["verdict_id"],
+        "delta_from": r["delta_from"], "delta_summary": _j(r["delta_summary"], None),
+        "parent_version": r["parent_version"], "fork_stage": r["fork_stage"],
+        "version_status": r["version_status"] or "complete",
+        "parties_snapshot": r["parties_snapshot"], "representatives_snapshot": r["representatives_snapshot"],
+        "completed_stages": _j(r["completed_stages"], []),
+    }
+
+
+def insert_state(topic_id: str, state: dict) -> None:
+    """Upsert a state row (⇄ dbInsertState ON CONFLICT). COALESCE preserves a parent's
+    forum_session/verdict/snapshots when the new write leaves them null."""
+    with connect() as c:
+        c.execute(
+            "INSERT INTO states (topic_id,version,label,created_at,trigger,clue_snapshot,"
+            "forum_session_id,verdict_id,delta_from,delta_summary,parent_version,fork_stage,"
+            "version_status,parties_snapshot,representatives_snapshot,completed_stages) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(topic_id,version) DO UPDATE SET "
+            "label=excluded.label, version_status=excluded.version_status, "
+            "forum_session_id=COALESCE(excluded.forum_session_id, states.forum_session_id), "
+            "verdict_id=COALESCE(excluded.verdict_id, states.verdict_id), "
+            "clue_snapshot=excluded.clue_snapshot, "
+            "parties_snapshot=COALESCE(excluded.parties_snapshot, states.parties_snapshot), "
+            "representatives_snapshot=COALESCE(excluded.representatives_snapshot, states.representatives_snapshot), "
+            "completed_stages=excluded.completed_stages",
+            (
+                topic_id, state["version"], state["label"], state["created_at"], state["trigger"],
+                json.dumps(state.get("clue_snapshot") or {"count": 0, "ids_and_versions": {}}),
+                state.get("forum_session_id"), state.get("verdict_id"),
+                state.get("delta_from"),
+                json.dumps(state["delta_summary"]) if state.get("delta_summary") else None,
+                state.get("parent_version"), state.get("fork_stage"),
+                state.get("version_status") or "in_progress",
+                state.get("parties_snapshot"), state.get("representatives_snapshot"),
+                json.dumps(state.get("completed_stages") or []),
+            ),
+        )
+
+
+def finalize_version(topic_id: str, version: int, updates: dict) -> None:
+    """Mark a version complete + persist final snapshots (⇄ dbFinalizeVersion)."""
+    sets = ["version_status = 'complete'"]
+    params: list = []
+    if updates.get("verdict_id"):
+        sets.append("verdict_id = ?"); params.append(updates["verdict_id"])
+    if updates.get("forum_session_id"):
+        sets.append("forum_session_id = ?"); params.append(updates["forum_session_id"])
+    if updates.get("clue_snapshot") is not None:
+        sets.append("clue_snapshot = ?"); params.append(json.dumps(updates["clue_snapshot"]))
+    if updates.get("parties_snapshot") is not None:
+        sets.append("parties_snapshot = ?"); params.append(updates["parties_snapshot"])
+    if updates.get("representatives_snapshot") is not None:
+        sets.append("representatives_snapshot = ?"); params.append(updates["representatives_snapshot"])
+    params.extend([topic_id, version])
+    with connect() as c:
+        c.execute(f"UPDATE states SET {', '.join(sets)} WHERE topic_id=? AND version=?", params)
+
+
+def update_version_field(topic_id: str, version: int, field: str, value) -> None:
+    """Set ONE whitelisted column on a version (⇄ dbUpdateVersionField). field is validated
+    against a fixed allow-list (never user input) so the f-string can't inject."""
+    allowed = {"forum_session_id", "verdict_id", "version_status", "label",
+               "parties_snapshot", "representatives_snapshot"}
+    if field not in allowed:
+        raise ValueError(f"update_version_field: illegal field {field!r}")
+    with connect() as c:
+        c.execute(f"UPDATE states SET {field} = ? WHERE topic_id=? AND version=?",
+                  (value, topic_id, version))
+
+
+def update_completed_stages(topic_id: str, version: int, stages: list[str],
+                            snapshots: dict | None = None) -> None:
+    """Persist completed_stages + optional snapshot updates (⇄ dbUpdateCompletedStages)."""
+    snapshots = snapshots or {}
+    sets = ["completed_stages = ?"]
+    params: list = [json.dumps(stages)]
+    if snapshots.get("parties_snapshot") is not None:
+        sets.append("parties_snapshot = ?"); params.append(snapshots["parties_snapshot"])
+    if snapshots.get("representatives_snapshot") is not None:
+        sets.append("representatives_snapshot = ?"); params.append(snapshots["representatives_snapshot"])
+    if snapshots.get("clue_snapshot") is not None:
+        sets.append("clue_snapshot = ?"); params.append(json.dumps(snapshots["clue_snapshot"]))
+    if snapshots.get("forum_session_id") is not None:
+        sets.append("forum_session_id = ?"); params.append(snapshots["forum_session_id"])
+    params.extend([topic_id, version])
+    with connect() as c:
+        c.execute(f"UPDATE states SET {', '.join(sets)} WHERE topic_id=? AND version=?", params)
+
+
+def get_current_clue_snapshot(topic_id: str) -> dict:
+    """{count, ids_and_versions:{clue_id: current_version}} over the topic's clues (⇄
+    getCurrentClueSnapshot). Sync; worker-thread safe."""
+    with connect() as c:
+        rows = c.execute(
+            "SELECT id, current_version FROM clues WHERE topic_id=?", (topic_id,)
+        ).fetchall()
+    ids_and_versions = {r["id"]: r["current_version"] for r in rows}
+    return {"count": len(rows), "ids_and_versions": ids_and_versions}
+
+
+def list_parties_sync(topic_id: str) -> list[dict]:
+    """Sync parties read shaped exactly like reads.list_parties (⇄ dbGetParties). Used to build
+    parties_snapshot JSON and to serve a version's pinned parties from the worker / API thread."""
+    with connect() as c:
+        rows = c.execute("SELECT * FROM parties WHERE topic_id=?", (topic_id,)).fetchall()
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["id"], "name": r["name"], "type": r["type"], "description": r["description"],
+            "weight": r["weight"], "agenda": r["agenda"], "stance": r["stance"],
+            "means": json.loads(r["means"] or "[]"),
+            "weight_factors": json.loads(r["weight_factors"] or "{}"),
+            "weight_evidence": json.loads(r["weight_evidence"] or "{}"),
+            "circle": json.loads(r["circle"] or '{"visible": [], "shadow": []}'),
+            "vulnerabilities": json.loads(r["vulnerabilities"] or "[]"),
+            "auto_discovered": bool(r["auto_discovered"]), "user_verified": bool(r["user_verified"]),
+        })
+    return out
+
+
+def list_representatives_sync(topic_id: str) -> list[dict]:
+    """Sync representatives read shaped like reads.list_representatives (⇄ dbGetRepresentatives)."""
+    with connect() as c:
+        rows = c.execute("SELECT * FROM representatives WHERE topic_id=?", (topic_id,)).fetchall()
+    return [{
+        "id": r["id"], "party_id": r["party_id"],
+        "persona_title": r["persona_title"], "persona_prompt": r["persona_prompt"],
+        "speaking_weight": r["speaking_weight"],
+        "speaking_budget": json.loads(r["speaking_budget"] or "{}"),
+        "auto_generated": bool(r["auto_generated"]),
+    } for r in rows]
 
 
 # ── Parties ───────────────────────────────────────────────────────────────────

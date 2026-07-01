@@ -10,7 +10,8 @@ from fastapi import APIRouter, HTTPException
 
 from ..db import topics as topics_repo
 from ..db import writers
-from ..pipeline import deep_research, discovery, enrichment, forum, forum_prep, scoring
+from ..events.bus import bus
+from ..pipeline import deep_research, delta, discovery, enrichment, forum, forum_prep, scoring
 from ..pipeline.runner import registry
 
 router = APIRouter()
@@ -158,11 +159,11 @@ async def run_full(topic_id: str):
 
 @router.post("/api/topics/{topic_id}/pipeline/update")
 async def delta_update(topic_id: str):
-    """Delta re-analysis (⇄ TS runDeltaPipeline). Guards: 404 missing / 400 unless status=='stale'
-    / 409 if already running. INTERIM: a true clue-version delta (computeDelta + per-rep delta
-    turns + state versioning) is not yet ported, so the work body runs a BOUNDED re-analysis
-    (forum-prep → forum → score) over the CURRENT clues and clears the stale flag — a real refresh,
-    not a fake diff. See DEFERRED notes in the batch report."""
+    """True delta re-analysis (⇄ TS runDeltaPipeline). Guards: 404 missing / 400 unless
+    status=='stale' / 409 if already running. Computes the clue-version delta vs the latest
+    complete version, forks a new version, runs per-rep delta position-update turns, synthesizes
+    scenario impacts, re-scores, and records the version COMPLETE with delta_from + delta_summary.
+    If computeDelta finds nothing new, the run emits an error event and clears the stale flag."""
     topic = await topics_repo.get_topic(topic_id)
     if topic is None:
         raise HTTPException(status_code=404, detail={"message": "Topic not found"})
@@ -171,20 +172,20 @@ async def delta_update(topic_id: str):
     run_id = f"delta-{_b36(int(time.time() * 1000))}"
 
     async def work() -> None:
-        await forum_prep.run_forum_prep(topic_id, topic["title"], topic["description"])
-        await forum.run_forum(topic_id, topic["title"], topic["description"])
-        await scoring.run_scoring(topic_id, topic["title"], topic["description"])
-        await asyncio.to_thread(writers.set_topic_status, topic_id, "complete")
+        try:
+            await delta.run_delta(topic_id, topic["title"], topic["description"], run_id)
+        except ValueError as e:
+            # No prior complete version / no changes detected: surface it and clear stale so the
+            # banner stops nagging (⇄ TS emit error then return).
+            bus.emit(topic_id, {"type": "error", "message": str(e)})
+            await asyncio.to_thread(writers.set_topic_status, topic_id, "complete")
 
     started = await registry.start(topic_id, run_id, work)
     if started is None:
         run = registry.active(topic_id) or {}
         raise HTTPException(status_code=409, detail={"message": "Pipeline already running",
                                                      "running": True, "run": run})
-    # Honest signal that this is the INTERIM bounded re-analysis, NOT a true versioned clue-delta
-    # (no computeDelta / state-version fork / DeltaRepresentativeAgent yet) — so the UI/audit
-    # doesn't mistake it for faithful delta semantics. See DEFERRED notes in the parity batch.
-    return {**started, "mode": "reanalysis_fallback"}
+    return started
 
 
 @router.post("/api/topics/{topic_id}/pipeline/reanalyze")

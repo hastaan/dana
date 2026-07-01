@@ -26,8 +26,25 @@ import re
 
 import dspy
 
+from ..agents.clue_intel import (
+    CleanupResolve,
+    CleanupScan,
+    ExtractClues,
+    FactCheckClue,
+    GenerateSearchQueries,
+    SmartEditClue,
+    UpdateClue,
+)
+from ..agents.delta_intel import DeltaRepresentative, DeltaScenarioImpact
 from ..agents.forum import FrameDebate, SpeakTurn, SynthesizeDebate
 from ..agents.forum_prep import AssessWeights, GenerateRepresentatives
+from ..agents.party_intel import (
+    PartyQueries,
+    SmartAddParty,
+    SmartEditParty,
+    SmartMergeParties,
+    SmartSplitParty,
+)
 from ..agents.scenario_scorer import GenerateScenarios, ScoreScenarios
 from ..db import reads
 from ..research.deep_search import NextQuestion, ResearchAngles, SynthesizeBriefing
@@ -66,6 +83,23 @@ REGISTRY: dict[str, type[dspy.Signature]] = {
     # Scenario scoring (verdict)
     "scoring/generate_scenarios": GenerateScenarios,
     "scoring/score_scenarios": ScoreScenarios,
+    # Party intelligence (smart add/edit/merge/split + research query-gen)
+    "party-intelligence/research_queries": PartyQueries,
+    "party-intelligence/add": SmartAddParty,
+    "party-intelligence/edit": SmartEditParty,
+    "party-intelligence/merge": SmartMergeParties,
+    "party-intelligence/split": SmartSplitParty,
+    # Clue extraction / management (smart edit, research, update, fact-check, cleanup)
+    "clue-extractor/extract": ExtractClues,
+    "clue-extractor/queries": GenerateSearchQueries,
+    "clue-extractor/edit": SmartEditClue,
+    "clue-extractor/update": UpdateClue,
+    "clue-extractor/fact_check": FactCheckClue,
+    "clue-extractor/cleanup_scan": CleanupScan,
+    "clue-extractor/cleanup_resolve": CleanupResolve,
+    # Delta update (clue-version delta re-analysis)
+    "delta-representative/system": DeltaRepresentative,
+    "forum/delta-scenario-impact": DeltaScenarioImpact,
 }
 
 # Default task profile per prompt (⇄ TS BUILTIN_DEFAULTS.task_profile) — purely advisory
@@ -87,6 +121,20 @@ TASK_PROFILE: dict[str, str] = {
     "forum/synthesize_debate": "deep_reasoning",
     "scoring/generate_scenarios": "deep_reasoning",
     "scoring/score_scenarios": "deep_reasoning",
+    "party-intelligence/research_queries": "fast",
+    "party-intelligence/add": "balanced",
+    "party-intelligence/edit": "balanced",
+    "party-intelligence/merge": "balanced",
+    "party-intelligence/split": "balanced",
+    "clue-extractor/extract": "balanced",
+    "clue-extractor/queries": "fast",
+    "clue-extractor/edit": "balanced",
+    "clue-extractor/update": "balanced",
+    "clue-extractor/fact_check": "deep_reasoning",
+    "clue-extractor/cleanup_scan": "fast",
+    "clue-extractor/cleanup_resolve": "balanced",
+    "delta-representative/system": "deep_reasoning",
+    "forum/delta-scenario-impact": "balanced",
 }
 
 # Snapshot the verbatim default instructions at import (before any override mutation), so a

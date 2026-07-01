@@ -17,10 +17,12 @@ export interface ActiveOperation {
   type: string
   label: string
   events: PipelineFeedItem[]
+  seen: Set<number> // server `_seq`s already added — dedupes replay-on-connect vs live
 }
 
 interface TopicPipelineState {
   items: PipelineFeedItem[]
+  seen: Set<number> // server `_seq`s already added to this topic's persistent feed
 }
 
 interface PipelineStore {
@@ -57,12 +59,12 @@ export const usePipelineStore = create<PipelineStore>((set) => ({
   resetTopic: (topicId) => set((state) => ({
     sessions: {
       ...state.sessions,
-      [topicId]: { items: [] },
+      [topicId]: { items: [], seen: new Set() },
     },
   })),
 
   startOperation: (topicId, type, label) => set(() => ({
-    activeOperation: { topicId, type, label, events: [] },
+    activeOperation: { topicId, type, label, events: [], seen: new Set() },
   })),
 
   finishOperation: () => set(() => ({
@@ -74,18 +76,27 @@ export const usePipelineStore = create<PipelineStore>((set) => ({
     set((state) => {
       const id = uid()
       const item = normalizeEvent(id, event)
+      const seq = event._seq
 
-      // Push to persistent session feed
-      const current = state.sessions[topicId] ?? { items: [] }
-      const nextSession = {
-        items: [...current.items.slice(-99), item],
+      // Push to persistent session feed, deduping by server `_seq` (replay-on-connect overlaps
+      // live events). When no _seq (shouldn't happen), fall through and append.
+      const current = state.sessions[topicId] ?? { items: [], seen: new Set<number>() }
+      let nextSession = current
+      if (seq === undefined || !current.seen.has(seq)) {
+        const seen = new Set(current.seen)
+        if (seq !== undefined) seen.add(seq)
+        nextSession = { items: [...current.items.slice(-99), item], seen }
       }
 
-      // Also push to active operation if it matches
+      // Also push to active operation if it matches — independent dedupe (its own SSE connection
+      // replays the same window).
       const op = state.activeOperation
-      const nextOp = op && op.topicId === topicId
-        ? { ...op, events: [...op.events, item] }
-        : op
+      let nextOp = op
+      if (op && op.topicId === topicId && (seq === undefined || !op.seen.has(seq))) {
+        const seen = new Set(op.seen)
+        if (seq !== undefined) seen.add(seq)
+        nextOp = { ...op, events: [...op.events, item], seen }
+      }
 
       return {
         sessions: { ...state.sessions, [topicId]: nextSession },

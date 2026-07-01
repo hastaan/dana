@@ -64,6 +64,23 @@ def make_lm(model: str | None = None, **kwargs) -> dspy.LM:
     )
 
 
+def model_for(topic_id: str | None, stage_key: str) -> str | None:
+    """Resolve the model a pipeline stage should use from the topic's per-stage model map
+    (⇄ TS topic.models[stage_key], e.g. data_gathering/enrichment/forum_reasoning/expert_council/
+    verdict/extraction/delta_updates). Returns the configured model id, or None to let lm_context
+    auto-pick. Best-effort + sync (worker-thread safe): any error → None (auto-pick). Imported
+    lazily to avoid a circular import (db.writers has no dep on this module)."""
+    if not topic_id:
+        return None
+    try:
+        from ..db import writers
+        models = writers.get_topic_models(topic_id)
+        m = (models or {}).get(stage_key)
+        return m or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _apply_overrides() -> None:
     """Install any operator instruction-overrides onto the DSPy signature classes IN PLACE
     (a process-wide mutation), BEFORE the caller constructs its DSPy modules — every stage

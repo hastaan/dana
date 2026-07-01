@@ -146,7 +146,11 @@ async def put_steering(topic_id: str, body: SteeringBody):
 
 
 @router.get("/api/topics/{topic_id}/parties")
-async def get_parties(topic_id: str):
+async def get_parties(topic_id: str, version: int | None = None):
+    """Parties for a topic. With ?version=, serve that version's pinned parties_snapshot for a
+    completed historical version (⇄ TS parties route ?version=); without it, the live parties."""
+    if version is not None:
+        return await reads.list_parties_at_version(topic_id, version)
     return await reads.list_parties(topic_id)
 
 
@@ -216,8 +220,10 @@ async def add_party(topic_id: str, body: PartyBody):
         "auto_discovered": False, "user_verified": True,
     }
 
+    model = dspy_lm.model_for(topic_id, "data_gathering")
+
     def _work():
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
             return party_intel.rescore_party(topic["title"], topic["description"], party)
 
     scored = await asyncio.to_thread(_work)
@@ -270,9 +276,10 @@ async def merge_parties(topic_id: str, body: MergeBody):
     target_id = target.get("id") or writers.slugify(tname)
     src_names = ", ".join(s.get("name", "?") for s in sources)
     bus.emit(topic_id, {"type": "think", "icon": "🔀", "label": f"Merging into {tname}", "detail": src_names[:100]})
+    model = dspy_lm.model_for(topic_id, "data_gathering")
 
     def _work():
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
             try:
                 prof = dspy.ChainOfThought(party_intel.SmartMergeParties)(
                     topic=topic["title"], sources=json.dumps(sources), target_name=tname,
@@ -309,12 +316,18 @@ async def smart_add_party(topic_id: str, body: SmartAddBody):
     existing = await reads.list_parties(topic_id)
     existing_names = ", ".join(p["name"] for p in existing)
     bus.emit(topic_id, {"type": "think", "icon": "➕", "label": f"Smart add: {name}"})
+    model = dspy_lm.model_for(topic_id, "data_gathering")
 
     def _work():
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
+            research = party_intel.gather_party_research(
+                topic_id, topic["title"], name, "build a full profile",
+                emit=lambda e: bus.emit(topic_id, e))
+            bus.emit(topic_id, {"type": "think", "icon": "🧠", "label": "Profiling party",
+                                "detail": f"Synthesizing a profile for {name}…"})
             prof = dspy.ChainOfThought(party_intel.SmartAddParty)(
                 topic=topic["title"], description=topic["description"],
-                party_name=name, existing_names=existing_names,
+                party_name=name, existing_names=existing_names, research=research,
             ).profile
             party = prof.model_dump()
             party.update(
@@ -345,11 +358,17 @@ async def smart_edit_party(topic_id: str, party_id: str, body: SmartEditBody):
         raise HTTPException(status_code=404, detail={"message": "Party not found"})
     # ⇄ TS PartyIntelligence.smartEditParty emitThink — match the exact label/icon the frontend renders.
     bus.emit(topic_id, {"type": "think", "icon": "📝", "label": f"Smart edit: {current['name']}", "detail": fb[:100]})
+    model = dspy_lm.model_for(topic_id, "data_gathering")
 
     def _work():
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
+            research = party_intel.gather_party_research(
+                topic_id, topic["title"], current["name"], fb,
+                emit=lambda e: bus.emit(topic_id, e))
+            bus.emit(topic_id, {"type": "think", "icon": "🧠", "label": "Re-profiling party",
+                                "detail": f"Applying your feedback to {current['name']}…"})
             prof = dspy.ChainOfThought(party_intel.SmartEditParty)(
-                topic=topic["title"], current_party=json.dumps(current), feedback=fb,
+                topic=topic["title"], current_party=json.dumps(current), feedback=fb, research=research,
             ).profile
             edited = {**current, **prof.model_dump(), "id": current["id"],
                       "auto_discovered": False, "user_verified": True}
@@ -379,9 +398,10 @@ async def split_party(topic_id: str, body: SplitBody):
     if source is None:
         raise HTTPException(status_code=404, detail={"message": "Party not found"})
     bus.emit(topic_id, {"type": "think", "icon": "🪓", "label": f"Splitting {source['name']}", "detail": ", ".join(names)[:100]})
+    model = dspy_lm.model_for(topic_id, "data_gathering")
 
     def _work():
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
             profs = dspy.ChainOfThought(party_intel.SmartSplitParty)(
                 topic=topic["title"], source_party=json.dumps(source), into_names=names,
             ).parties or []
@@ -446,13 +466,25 @@ async def get_verdict_version(topic_id: str, version: int):
 
 # ── Forum (⇄ TS forum.ts) ──────────────────────────────────────────────────────
 @router.get("/api/topics/{topic_id}/representatives")
-async def get_representatives(topic_id: str):
+async def get_representatives(topic_id: str, version: int | None = None):
+    """Representatives for a topic. With ?version=, serve that version's pinned
+    representatives_snapshot for a completed historical version (⇄ TS forum route ?version=)."""
+    if version is not None:
+        return await reads.list_representatives_at_version(topic_id, version)
     return await reads.list_representatives(topic_id)
 
 
 @router.get("/api/topics/{topic_id}/forum")
 async def get_forum(topic_id: str, version: int | None = None):
-    return await reads.get_forum_session(topic_id, version=version)
+    """Forum session. With ?version=, resolve the version's forum_session_id from `states` and
+    serve that session — but only once the forum stage completed for that version (⇄ TS forum
+    route ?version=). Without it, the latest session."""
+    if version is not None:
+        state = await reads._get_state(topic_id, version)
+        if not state or "forum" not in state["completed_stages"] or not state["forum_session_id"]:
+            return None
+        return await reads.get_forum_session(topic_id, session_id=state["forum_session_id"])
+    return await reads.get_forum_session(topic_id)
 
 
 @router.get("/api/topics/{topic_id}/forum/{session_id}")

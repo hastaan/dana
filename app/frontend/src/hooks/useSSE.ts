@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react"
 
-export type SSEEvent =
+// Every server event carries a monotonic `_seq` (added by the bus) so consumers can dedupe the
+// replay-on-connect window against live events. `ping` has no _seq.
+export type SSEEvent = { _seq?: number } & (
   | { type: "think"; icon: string; label: string; detail?: string }
   | { type: "progress"; stage: string; pct: number; msg: string }
   | { type: "forum_turn"; turn: Record<string, unknown> }
@@ -11,6 +13,7 @@ export type SSEEvent =
   | { type: "stage_complete"; stage: string; session_id?: string }
   | { type: "error"; message: string }
   | { type: "ping" }
+)
 
 // Always-on SSE connection — connects as long as topicId is provided
 export function useSSE(topicId: string | null, onEvent: (event: SSEEvent) => void) {

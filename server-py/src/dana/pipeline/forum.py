@@ -18,6 +18,7 @@ from ..agents.forum import Moderator, Representative, Supervisor, Synthesizer
 from ..db import reads, writers
 from ..events.bus import bus
 from ..llm import dspy_lm, steering
+from . import state_manager
 from .scoring import forum_evidence_str
 
 PHASE_ORDER = ["opening_statements", "rebuttal", "closing"]
@@ -111,8 +112,9 @@ async def run_forum(topic_id: str, title: str, description: str) -> dict:
     def emit(ev: dict) -> None:
         bus.emit(topic_id, ev)
 
-    version = 1
     writers.set_topic_status(topic_id, "forum")
+    version = await asyncio.to_thread(
+        state_manager.get_or_allocate_version, topic_id, fork_stage="forum")
     emit({"type": "progress", "stage": "forum", "pct": 0.0, "msg": "Starting forum…"})
 
     parties = await reads.list_parties(topic_id)
@@ -127,9 +129,10 @@ async def run_forum(topic_id: str, title: str, description: str) -> dict:
     evidence_str = forum_evidence_str(clues)
 
     session_id = writers.create_forum_session(topic_id, version, "full")
+    model = dspy_lm.model_for(topic_id, "forum_reasoning")
 
     def _frame() -> dict:
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
             out = Moderator()(topic=topic_str, parties=parties_str, evidence=evidence_str)
             return {"central_question": out.central_question, "points_of_contention": list(out.points_of_contention)}
 
@@ -199,7 +202,7 @@ async def run_forum(topic_id: str, title: str, description: str) -> dict:
             def _moderate(_pl=parties_list, _td=turn_distribution, _rs=recent_speakers,
                           _sp=silent_str, _bw=warning, _ss=scenarios_summary, _lt=last_turn,
                           _tn=turn_count + 1, _steer=steer) -> dict:
-                with dspy_lm.lm_context():
+                with dspy_lm.lm_context(model):
                     d = sup(
                         topic=topic_str + _steer, parties_list=_pl, turn_distribution=_td,
                         recent_speakers=_rs, silent_parties=_sp, budget_warning=_bw,
@@ -249,7 +252,7 @@ async def run_forum(topic_id: str, title: str, description: str) -> dict:
         ) or "(you speak first)"
 
         def _speak(_persona=persona, _phase=phase, _directive=full_directive, _recent=recent_text) -> dict:
-            with dspy_lm.lm_context():
+            with dspy_lm.lm_context(model):
                 o = Representative()(
                     topic=topic_str, persona=_persona, phase=_phase, directive=_directive,
                     recent_turns=_recent, evidence=evidence_str,
@@ -311,12 +314,14 @@ async def run_forum(topic_id: str, title: str, description: str) -> dict:
     transcript = "\n\n".join(f"[{t['type']}] {t['party_name']}: {t['statement']}" for t in all_turns)
 
     def _synth() -> str:
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
             return Synthesizer()(topic=topic_str, transcript=transcript[:12000]).debate_summary
 
     debate_summary = await asyncio.to_thread(_synth) if all_turns else ""
     writers.save_forum_scenario_summary(session_id, topic_id, _scenario_summary(scenarios, all_turns))
     writers.complete_forum_session(session_id, topic_id, debate_summary)
+    await asyncio.to_thread(state_manager.set_version_session_id, topic_id, version, session_id)
+    await asyncio.to_thread(state_manager.mark_stage_complete, topic_id, version, "forum")
     writers.set_topic_status(topic_id, "review_forum")
     emit({"type": "progress", "stage": "forum", "pct": 1.0,
           "msg": f"Forum complete — {len(all_turns)} turns, {len(scenarios)} scenarios"})

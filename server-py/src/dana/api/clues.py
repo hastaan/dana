@@ -106,10 +106,11 @@ class CleanupApplyBody(BaseModel):
 # ── Reads ───────────────────────────────────────────────────────────────────────────
 @router.get("/api/topics/{topic_id}/clues")
 async def get_clues(topic_id: str, version: int | None = None):
-    """List clues in the frontend-nested shape. The TS backend served a pinned clue_snapshot for
-    completed historical versions; server-py has no states/snapshot reader, so (documented
-    simplification) every request returns the current list_clues_api — the only version the
-    frontend can still edit. (Supersedes the topics.py stub.)"""
+    """List clues in the frontend-nested shape. With ?version=, serve that version's pinned
+    clue_snapshot for completed historical versions (⇄ TS dbGetCluesAtSnapshot): empty until
+    enrichment completed, each clue pinned to its snapshot version. Without it, the live list."""
+    if version is not None:
+        return await reads.list_clues_api_at_version(topic_id, version)
     return await reads.list_clues_api(topic_id)
 
 
@@ -210,9 +211,10 @@ async def smart_edit_clue(topic_id: str, clue_id: str, body: FeedbackBody):
         "date": cur.get("timeline_date", ""), "clue_type": cur.get("clue_type", "event"),
     }
     _think(topic_id, "📝", "Smart edit started", f'Editing "{current_data["title"]}" — {fb[:80]}')
+    model = dspy_lm.model_for(topic_id, "extraction")
 
     def _work():
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
             return clue_intel.smart_edit_clue(topic["title"], current_data, fb,
                                               topic_id=topic_id, emit=lambda e: bus.emit(topic_id, e))
 
@@ -240,9 +242,10 @@ async def research_clues(topic_id: str, body: ResearchBody):
     if not q:
         raise HTTPException(status_code=400, detail={"message": "query is required"})
     parties = await reads.list_parties(topic_id)
+    model = dspy_lm.model_for(topic_id, "extraction")
 
     def _work():
-        with dspy_lm.lm_context():
+        with dspy_lm.lm_context(model):
             return clue_intel.smart_extract_research(
                 topic["title"], topic["description"], q, parties,
                 topic_id=topic_id, emit=lambda e: bus.emit(topic_id, e))
@@ -375,8 +378,10 @@ async def _run_cleanup(topic: dict) -> None:
                 "domain_tags": cur.get("domain_tags", []),
             })
 
+        model = dspy_lm.model_for(tid, "extraction")
+
         def _work():
-            with dspy_lm.lm_context():
+            with dspy_lm.lm_context(model):
                 return clue_intel.cleanup_propose(topic["title"], clue_inputs, parties)
 
         groups = await asyncio.to_thread(_work)
@@ -492,6 +497,7 @@ async def _cleanup_factcheck_sweep(topic: dict) -> None:
                    if c["status"] == "pending" or not (_cur_version(c).get("fact_check") or {}).get("verdict")]
         _think(tid, "🔬", f"Fact-checking {len(pending)} pending clue(s)…")
         sem = asyncio.Semaphore(_SWEEP_CONCURRENCY)
+        model = dspy_lm.model_for(tid, "extraction")
 
         async def _check(clue: dict) -> None:
             async with sem:
@@ -506,7 +512,7 @@ async def _cleanup_factcheck_sweep(topic: dict) -> None:
                 }
 
                 def _work():
-                    with dspy_lm.lm_context():
+                    with dspy_lm.lm_context(model):
                         return clue_intel.fact_check_clue(
                             topic["title"], topic["description"], fields,
                             topic_id=tid, emit=lambda e: bus.emit(tid, e))
@@ -535,6 +541,7 @@ async def _bulk_import_agent(topic: dict, content: str, parties: list[dict]) -> 
     The TS updates_clue_id path (in-place version bump of an existing clue) is dropped as a bounded
     simplification — evidence-update covers refresh. Emits think + stage_complete:bulk_import."""
     tid = topic["id"]
+    model = dspy_lm.model_for(tid, "extraction")
     chunks = clue_intel.smart_chunk(content)
     _think(tid, "📋", f"Bulk import: {len(chunks)} chunks to process", f"{len(content)} chars input")
     existing_index = await asyncio.to_thread(writers.clue_index, tid)
@@ -552,7 +559,7 @@ async def _bulk_import_agent(topic: dict, content: str, parties: list[dict]) -> 
             _think(tid, "📋", f"Processing chunk {idx}/{len(chunks)}", chunk[:80])
 
             def _extract():
-                with dspy_lm.lm_context():
+                with dspy_lm.lm_context(model):
                     return clue_intel.smart_extract_from_text(
                         topic["title"], topic["description"], chunk, parties, existing_index)
 
@@ -594,7 +601,7 @@ async def _bulk_import_agent(topic: dict, content: str, parties: list[dict]) -> 
                 }
 
                 def _fc():
-                    with dspy_lm.lm_context():
+                    with dspy_lm.lm_context(model):
                         return clue_intel.fact_check_clue(
                             topic["title"], topic["description"], fields,
                             topic_id=tid, emit=lambda e: bus.emit(tid, e))
@@ -619,6 +626,7 @@ async def _evidence_update_agent(topic: dict, clues: list[dict], parties: list[d
     via UpdateClue; on has_update build a new version (preserving relevance/parties/domain_tags),
     add it, then fact-check + apply. Emits think + stage_complete:evidence_update."""
     tid = topic["id"]
+    model = dspy_lm.model_for(tid, "extraction")
     _think(tid, "🔄", f"Checking {len(clues)} clues for updates", _today())
     result = {"checked": 0, "updated": 0, "unchanged": 0}
     sem = asyncio.Semaphore(_UPDATE_CONCURRENCY)
@@ -641,7 +649,7 @@ async def _evidence_update_agent(topic: dict, clues: list[dict], parties: list[d
                    f"Original date: {cur.get('timeline_date', 'unknown')}")
 
             def _work():
-                with dspy_lm.lm_context():
+                with dspy_lm.lm_context(model):
                     return clue_intel.update_clue(topic["title"], topic["description"], fields,
                                                  topic_id=tid, emit=lambda e: bus.emit(tid, e))
 
@@ -691,7 +699,7 @@ async def _evidence_update_agent(topic: dict, clues: list[dict], parties: list[d
             }
 
             def _fc():
-                with dspy_lm.lm_context():
+                with dspy_lm.lm_context(model):
                     return clue_intel.fact_check_clue(topic["title"], topic["description"], fc_fields,
                                                      topic_id=tid, emit=lambda e: bus.emit(tid, e))
 

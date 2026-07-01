@@ -11,6 +11,7 @@ import { CluesPanel } from "@/components/Topic/CluesPanel"
 import { ForumTab } from "@/components/Topic/ForumTab"
 import { VerdictPanel } from "@/components/Expert/VerdictPanel"
 import { SteeringPanel } from "@/components/Topic/SteeringPanel"
+import { StalenessBanner } from "@/components/Topic/StalenessBanner"
 
 
 const TAB_SLUGS = ["overview", "parties", "evidence", "forum", "verdict"] as const
@@ -52,6 +53,7 @@ export function TopicView() {
     const statusMap: Record<string, string> = {
       discover: "discovery", enrich: "enrichment", forum_prep: "forum_prep",
       forum: "forum", score: "expert_council", analyze: "forum_prep", reanalyze: "forum_prep",
+      update: "forum",
     }
     // All stages use PipelineActivityFeed for SSE — no popup modal needed
     try {
@@ -63,6 +65,7 @@ export function TopicView() {
         score: () => api.pipeline.score(id),
         analyze: () => api.pipeline.analyze(id),
         reanalyze: () => api.pipeline.reanalyze(id),
+        update: () => api.pipeline.update(id),
       }
       await apiCall[action]?.()
       setTopic(current => current ? { ...current, status: statusMap[action] ?? current.status } : current)
@@ -116,6 +119,9 @@ export function TopicView() {
         <span className="text-border">|</span>
         <span className="truncate font-mono text-xs text-muted-foreground">{topic.id}</span>
       </div>
+      {isCurrentVersion && (
+        <StalenessBanner topicId={id} status={topic.status} onUpdate={() => handlePipelineAction("update")} />
+      )}
       {pipelineFeed}
       <SteeringPanel topicId={id} />
     </div>,
